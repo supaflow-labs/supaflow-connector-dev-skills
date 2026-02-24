@@ -1,0 +1,4 @@
+interface:
+  display_name: "Build Supaflow Connector"
+  short_description: "Phase-guided Supaflow connector implementation."
+  default_prompt: "Use $build-supaflow-connector to build or review a Supaflow source, destination, or activation connector with gate checks."
