@@ -37,11 +37,11 @@ Works with **Claude Code**, **OpenAI Codex**, and any agent that supports skill/
 
 ```bash
 # Clone the repo
-git clone https://github.com/supaflow/supaflow-connector-skills.git
+git clone https://github.com/supaflow-labs/supaflow-connector-dev-skills.git
 
 # Symlink the skill into your Claude Code skills directory
 mkdir -p ~/.claude/skills
-ln -s "$(pwd)/supaflow-connector-skills/skills/build-supaflow-connector" \
+ln -s "$(pwd)/supaflow-connector-dev-skills/skills/build-supaflow-connector" \
       ~/.claude/skills/build-supaflow-connector
 ```
 
@@ -208,7 +208,7 @@ Auto-detected when connector has `REPLICATION_DESTINATION` or `REVERSE_ETL_DESTI
 ## Skill Structure
 
 ```
-supaflow-connector-skills/
+supaflow-connector-dev-skills/
 ├── skills/
 │   └── build-supaflow-connector/
 │       ├── SKILL.md                          # Skill entry point
@@ -282,7 +282,7 @@ document the skip reason in your handoff notes.
 
 **How do I update the skill after cloning?**
 ```bash
-cd supaflow-connector-skills
+cd supaflow-connector-dev-skills
 git pull
 ```
 The symlink (Claude Code) points to the live repo, so updates are immediate.
