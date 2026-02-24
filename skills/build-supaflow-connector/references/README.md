@@ -2,6 +2,48 @@
 
 This directory contains phased skill documents for building Supaflow connectors.
 
+## Codex Quick Start (Codex-Specific)
+
+This section is specific to Codex local skills. Do not assume these install/trigger steps apply to other coding agents.
+
+### 1) Install the skill locally in Codex
+
+```bash
+mkdir -p ~/.codex/skills
+SKILL_SRC="/absolute/path/to/build-supaflow-connector"
+rsync -a "$SKILL_SRC"/ ~/.codex/skills/build-supaflow-connector/
+```
+
+Example with this repo:
+
+```bash
+rsync -a /path/to/supaflow-connector-skills/skills/build-supaflow-connector/ ~/.codex/skills/build-supaflow-connector/
+```
+
+### 2) Start a new Codex session
+
+Codex loads installed skills at session start. Open a new chat/session after copying the skill.
+
+### 3) Trigger the skill in prompt
+
+Use either syntax:
+
+- `$build-supaflow-connector`
+- `Use the build-supaflow-connector skill`
+
+### 4) Real prompt example (copy/paste)
+
+```text
+Use $build-supaflow-connector.
+
+platform_root: /absolute/path/to/supaflow-platform
+connector_name: stripe
+connector_mode: source
+auth_type: API key
+api_surface: objects=customers,invoices,charges; pagination=cursor; rate_limit=100 req/sec; cursor_fields=created
+test_credentials: STRIPE_API_KEY
+```
+
 ## Skill Documents
 
 | Phase | File | Purpose | Gate Checks |
