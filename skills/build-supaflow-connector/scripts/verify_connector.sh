@@ -102,9 +102,19 @@ else
 fi
 
 # ==============================================================================
-# Find IT test file (used by both source and destination checks)
+# Find IT test files (used by both source and destination checks)
 # ==============================================================================
-IT_TEST_FILE=$(find "$CONNECTOR_DIR/src/test" -name "*ConnectorIT.java" 2>/dev/null | head -1)
+IT_TEST_FILES=$(find "$CONNECTOR_DIR/src/test" -name "*IT.java" 2>/dev/null)
+IT_TEST_FILE=""
+IT_TEST_COUNT=0
+
+if [[ -n "$IT_TEST_FILES" ]]; then
+    IT_TEST_COUNT=$(echo "$IT_TEST_FILES" | sed '/^[[:space:]]*$/d' | wc -l | tr -d '[:space:]')
+    IT_TEST_FILE=$(echo "$IT_TEST_FILES" | grep "ConnectorIT.java" | head -1)
+    if [[ -z "$IT_TEST_FILE" ]]; then
+        IT_TEST_FILE=$(echo "$IT_TEST_FILES" | head -1)
+    fi
+fi
 
 if ! $SKIP_SOURCE_CHECKS; then
 # ==============================================================================
@@ -285,6 +295,49 @@ fi
 
 echo ""
 
+# Source-only connectors still need interface-required stubs for destination methods.
+if $IS_SOURCE_CONNECTOR && ! $IS_DESTINATION_CONNECTOR_EARLY; then
+    echo "  Source-only stub method checks:"
+
+    if grep -q "public.*ObjectMetadata mapToTargetObject" "$CONNECTOR_FILE"; then
+        if grep -A12 "public.*ObjectMetadata mapToTargetObject" "$CONNECTOR_FILE" | grep -q "UnsupportedOperationException"; then
+            echo "✓ mapToTargetObject() source-only stub present"
+        else
+            echo "⚠️  WARNING: mapToTargetObject() exists but does not throw UnsupportedOperationException"
+            WARNINGS=$((WARNINGS + 1))
+        fi
+    else
+        echo "⚠️  WARNING: Missing mapToTargetObject() stub for source-only connector"
+        WARNINGS=$((WARNINGS + 1))
+    fi
+
+    if grep -q "public.*StageResponse stage" "$CONNECTOR_FILE"; then
+        if grep -A8 "public.*StageResponse stage" "$CONNECTOR_FILE" | grep -q "UnsupportedOperationException"; then
+            echo "✓ stage() source-only stub present"
+        else
+            echo "⚠️  WARNING: stage() exists but does not throw UnsupportedOperationException"
+            WARNINGS=$((WARNINGS + 1))
+        fi
+    else
+        echo "⚠️  WARNING: Missing stage() stub for source-only connector"
+        WARNINGS=$((WARNINGS + 1))
+    fi
+
+    if grep -q "public.*LoadResponse load" "$CONNECTOR_FILE"; then
+        if grep -A8 "public.*LoadResponse load" "$CONNECTOR_FILE" | grep -q "UnsupportedOperationException"; then
+            echo "✓ load() source-only stub present"
+        else
+            echo "⚠️  WARNING: load() exists but does not throw UnsupportedOperationException"
+            WARNINGS=$((WARNINGS + 1))
+        fi
+    else
+        echo "⚠️  WARNING: Missing load() stub for source-only connector"
+        WARNINGS=$((WARNINGS + 1))
+    fi
+
+    echo ""
+fi
+
 # ==============================================================================
 # CHECK 3.5: FieldMetadata Requirements (for REST connectors)
 # ==============================================================================
@@ -339,7 +392,7 @@ if [ ! -f "$CONNECTOR_DIR/src/main/resources/version.properties" ]; then
     ERRORS=$((ERRORS + 1))
 else
     echo "✓ Found version.properties"
-    if ! grep -q "connector.version=" "$CONNECTOR_DIR/src/main/resources/version.properties"; then
+    if ! grep -qE 'connector\.version=|project\.version' "$CONNECTOR_DIR/src/main/resources/version.properties"; then
         echo "⚠️  WARNING: version.properties missing 'connector.version=' entry"
         WARNINGS=$((WARNINGS + 1))
     fi
@@ -653,50 +706,44 @@ else
     fi
 fi
 
+# Security default check for TLS certificate trust behavior
+if grep -q "trustServerCertificate" "$CONNECTOR_FILE"; then
+    if grep -A10 -B6 "trustServerCertificate" "$CONNECTOR_FILE" | grep -q 'defaultValue[[:space:]]*=[[:space:]]*"true"'; then
+        echo "⚠️  WARNING: trustServerCertificate defaults to true"
+        echo "   → Recommended default is false for production safety"
+        WARNINGS=$((WARNINGS + 1))
+    fi
+fi
+
 # Check icon lookup
 echo ""
 echo "  Icon Check:"
 
 # Derive expected icon filename from connector name
 if [[ -n "$CONNECTOR_DISPLAY_NAME" ]]; then
-    # Convert PascalCase to lowercase_with_underscores
-    # e.g., OracleTM -> oracle_tm, HubSpot -> hubspot, Postgres -> postgres
-    # Insert underscore before each uppercase letter (except first), then lowercase all
-    ICON_NAME=$(echo "$CONNECTOR_DISPLAY_NAME" | sed 's/\([A-Z]\)/_\1/g' | sed 's/^_//' | tr '[:upper:]' '[:lower:]')
-
-    # Check in supaflow-www (relative path from supaflow-platform)
-    ICON_PATH="../supaflow-www/public/connectors/${ICON_NAME}.svg"
     ICON_FOUND=""
+    ICON_NAME_DISPLAY=$(echo "$CONNECTOR_DISPLAY_NAME" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/_/g' | sed 's/__*/_/g' | sed 's/^_//; s/_$//')
+    ICON_NAME_DISPLAY_SIMPLE=$(echo "$CONNECTOR_DISPLAY_NAME" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]//g')
+    ICON_PATH_ARTIFACT="../supaflow-www/public/connectors/${CONNECTOR_NAME}.svg"
+    ICON_PATH_DISPLAY="../supaflow-www/public/connectors/${ICON_NAME_DISPLAY}.svg"
+    ICON_PATH_DISPLAY_SIMPLE="../supaflow-www/public/connectors/${ICON_NAME_DISPLAY_SIMPLE}.svg"
 
-    if [ -f "$ICON_PATH" ]; then
-        echo "✓ Found icon: connectors/${ICON_NAME}.svg"
+    if [ -f "$ICON_PATH_ARTIFACT" ]; then
+        echo "✓ Found icon: connectors/${CONNECTOR_NAME}.svg"
         ICON_FOUND="yes"
-    else
-        # Try without underscores (e.g., hubspot instead of hub_spot)
-        ICON_NAME_SIMPLE=$(echo "$CONNECTOR_DISPLAY_NAME" | tr '[:upper:]' '[:lower:]')
-        ICON_PATH_SIMPLE="../supaflow-www/public/connectors/${ICON_NAME_SIMPLE}.svg"
-
-        if [ -f "$ICON_PATH_SIMPLE" ]; then
-            echo "✓ Found icon: connectors/${ICON_NAME_SIMPLE}.svg"
-            ICON_FOUND="yes"
-        else
-            # Try base name (e.g., oracle from OracleTM, salesforce from SalesforceMarketingCloud)
-            # Extract first word by splitting on uppercase
-            ICON_NAME_BASE=$(echo "$CONNECTOR_DISPLAY_NAME" | sed 's/\([A-Z][a-z]*\).*/\1/' | tr '[:upper:]' '[:lower:]')
-            ICON_PATH_BASE="../supaflow-www/public/connectors/${ICON_NAME_BASE}.svg"
-
-            if [ -f "$ICON_PATH_BASE" ]; then
-                echo "✓ Found base icon: connectors/${ICON_NAME_BASE}.svg"
-                echo "   ℹ️  Consider creating specific icon: connectors/${ICON_NAME}.svg"
-                ICON_FOUND="yes"
-            fi
-        fi
+    elif [ -f "$ICON_PATH_DISPLAY" ]; then
+        echo "✓ Found icon: connectors/${ICON_NAME_DISPLAY}.svg"
+        ICON_FOUND="yes"
+    elif [ -f "$ICON_PATH_DISPLAY_SIMPLE" ]; then
+        echo "✓ Found icon: connectors/${ICON_NAME_DISPLAY_SIMPLE}.svg"
+        ICON_FOUND="yes"
     fi
 
     if [ -z "$ICON_FOUND" ]; then
         echo "⚠️  WARNING: No icon found at expected locations:"
-        echo "   → Checked: connectors/${ICON_NAME}.svg"
-        echo "   → Checked: connectors/${ICON_NAME_SIMPLE}.svg"
+        echo "   → Checked: connectors/${CONNECTOR_NAME}.svg"
+        echo "   → Checked: connectors/${ICON_NAME_DISPLAY}.svg"
+        echo "   → Checked: connectors/${ICON_NAME_DISPLAY_SIMPLE}.svg"
         echo "   → Use placeholder icon or create new SVG"
         WARNINGS=$((WARNINGS + 1))
     fi
@@ -934,19 +981,20 @@ echo "━━━━━━━━━━━━━━━━━━━━━━━━�
 echo "✓ CHECK 15: Integration Tests Exist"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
-# IT_TEST_FILE already set earlier (line 93)
+# IT_TEST_FILE/IT_TEST_FILES already set earlier
 if [[ -n "$IT_TEST_FILE" ]]; then
-    echo "✓ Found IT test: $(basename "$IT_TEST_FILE")"
+    echo "✓ Found IT test file(s): $IT_TEST_COUNT"
+    echo "   Primary file: $(basename "$IT_TEST_FILE")"
 
     # Check for required test annotations
-    if grep -q "@TestInstance.*PER_CLASS" "$IT_TEST_FILE"; then
+    if grep -R -q --include="*IT.java" "@TestInstance.*PER_CLASS" "$CONNECTOR_DIR/src/test"; then
         echo "✓ Has @TestInstance(PER_CLASS) annotation"
     else
         echo "⚠️  WARNING: Missing @TestInstance(Lifecycle.PER_CLASS)"
         WARNINGS=$((WARNINGS + 1))
     fi
 
-    if grep -q "@TestMethodOrder" "$IT_TEST_FILE"; then
+    if grep -R -q --include="*IT.java" "@TestMethodOrder" "$CONNECTOR_DIR/src/test"; then
         echo "✓ Has @TestMethodOrder annotation"
     else
         echo "⚠️  WARNING: Missing @TestMethodOrder(OrderAnnotation.class)"
@@ -954,35 +1002,45 @@ if [[ -n "$IT_TEST_FILE" ]]; then
     fi
 
     # Check for required tests
-    if grep -q "testConnectorInitialized\|testInit" "$IT_TEST_FILE"; then
+    if grep -R -q --include="*IT.java" "testConnectorInitialized\|testInit\|testConnection" "$CONNECTOR_DIR/src/test"; then
         echo "✓ Has initialization test"
     else
-        echo "⚠️  WARNING: Missing initialization test"
+        echo "⚠️  WARNING: Missing initialization test (expected: testInit, testConnection, or testConnectorInitialized)"
         WARNINGS=$((WARNINGS + 1))
     fi
 
-    if grep -q "testListObjects\|testSchemaDiscovery\|testSchema" "$IT_TEST_FILE"; then
+    if grep -R -q --include="*IT.java" "testListObjects\|testSchemaDiscovery\|testSchema" "$CONNECTOR_DIR/src/test"; then
         echo "✓ Has schema discovery test"
     else
-        echo "⚠️  WARNING: Missing schema discovery test"
+        echo "⚠️  WARNING: Missing schema discovery test (expected: testSchema, testSchemaDiscovery, or testListObjects)"
         WARNINGS=$((WARNINGS + 1))
     fi
 
-    if grep -q "testReadData\|testRead" "$IT_TEST_FILE"; then
+    if grep -R -q --include="*IT.java" "testReadData\|testRead\|testReadReturns" "$CONNECTOR_DIR/src/test"; then
         echo "✓ Has read data test"
     else
-        echo "⚠️  WARNING: Missing read data test"
+        echo "⚠️  WARNING: Missing read data test (expected: testRead, testReadData, or testReadReturns)"
         WARNINGS=$((WARNINGS + 1))
     fi
 
-    if grep -q "testCursorTracking\|testIncremental" "$IT_TEST_FILE"; then
+    if grep -R -q --include="*IT.java" "testCursorTracking\|testIncremental\|testCursor" "$CONNECTOR_DIR/src/test"; then
         echo "✓ Has cursor tracking test"
     else
-        echo "⚠️  WARNING: Missing cursor tracking test"
+        echo "⚠️  WARNING: Missing cursor tracking test (expected: testCursor, testCursorTracking, or testIncremental)"
         WARNINGS=$((WARNINGS + 1))
     fi
+
+    # IT tests should also model processor lifecycle correctly.
+    if grep -R --include="*IT.java" -h "processor\.close()" "$CONNECTOR_DIR/src/test" \
+        | grep -v '^[[:space:]]*//' | grep -v '^[[:space:]]*\*' >/dev/null; then
+        echo "⚠️  WARNING: IT test manually calls processor.close()"
+        echo "   → Tests should model runtime behavior where executor owns processor lifecycle"
+        WARNINGS=$((WARNINGS + 1))
+    else
+        echo "✓ IT test does not call processor.close()"
+    fi
 else
-    echo "❌ ERROR: No integration test file found (*ConnectorIT.java)"
+    echo "❌ ERROR: No integration test file found (*IT.java)"
     echo "   → Create IT tests following CONNECTOR_TESTING_SKILL.md"
     echo "   → IT tests validate the full connector lifecycle"
     ERRORS=$((ERRORS + 1))
@@ -991,6 +1049,40 @@ fi
 echo ""
 
 fi # End of source checks conditional block
+
+# ==============================================================================
+# JDBC CONNECTOR CHECKS (auto-detected)
+# Only run if connector extends BaseJdbcConnector
+# ==============================================================================
+
+if $IS_JDBC_CONNECTOR; then
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "✓ JDBC CONNECTOR CHECKS"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "ℹ️  Detected BaseJdbcConnector subclass"
+    echo ""
+
+    if grep -rq "convertToCanonicalValue" "$CONNECTOR_SRC_DIR" 2>/dev/null; then
+        echo "✓ Has convertToCanonicalValue override (handles driver-specific types)"
+    else
+        echo "⚠️  WARNING: Missing convertToCanonicalValue override"
+        echo "   → JDBC drivers return proprietary Java types (e.g., microsoft.sql.DateTimeOffset)"
+        echo "   → Without this override, these types cause ClassCastException at runtime"
+        echo "   → See JDBC_CONNECTOR_GUIDE.md for implementation pattern"
+        WARNINGS=$((WARNINGS + 1))
+    fi
+
+    if grep -rq "mapTypeByName" "$CONNECTOR_SRC_DIR" 2>/dev/null; then
+        echo "✓ Has mapTypeByName override (maps database-specific type names)"
+    else
+        echo "⚠️  WARNING: Missing mapTypeByName override"
+        echo "   → Database-specific types may not map correctly via JDBC type constants alone"
+        echo "   → See JDBC_CONNECTOR_GUIDE.md for implementation pattern"
+        WARNINGS=$((WARNINGS + 1))
+    fi
+
+    echo ""
+fi
 
 # ==============================================================================
 # DESTINATION CONNECTOR CHECKS (16-25)
@@ -1433,8 +1525,9 @@ if $IS_DESTINATION_CONNECTOR; then
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
     if [[ -n "$IT_TEST_FILE" ]]; then
+        echo "✓ Found IT test file(s): $IT_TEST_COUNT"
         # Check for destination-specific tests
-        if grep -q "testLoad\|testWrite\|testUpsert" "$IT_TEST_FILE" 2>/dev/null; then
+        if grep -R -q --include="*IT.java" "testLoad\|testWrite\|testUpsert" "$CONNECTOR_DIR/src/test" 2>/dev/null; then
             echo "✓ Has load/write test"
         else
             echo "⚠️  WARNING: Missing load/write test in IT"
@@ -1442,7 +1535,7 @@ if $IS_DESTINATION_CONNECTOR; then
         fi
 
         # CRITICAL: Check for realistic test data (not simplified)
-        if grep -q "success_part_" "$IT_TEST_FILE"; then
+        if grep -R -q --include="*IT.java" "success_part_" "$CONNECTOR_DIR/src/test"; then
             echo "✓ Uses realistic CSV file patterns (success_part_*.csv)"
         else
             echo "⚠️  WARNING: IT tests may use simplified CSV file names"
@@ -1452,7 +1545,7 @@ if $IS_DESTINATION_CONNECTOR; then
         fi
 
         # Check for namespace prefix validation
-        if grep -q "pipelinePrefix\|pipeline_prefix\|namespace.*prefix" "$IT_TEST_FILE"; then
+        if grep -R -q --include="*IT.java" "pipelinePrefix\|pipeline_prefix\|namespace.*prefix" "$CONNECTOR_DIR/src/test"; then
             echo "✓ Tests namespace prefix application"
         else
             echo "⚠️  WARNING: IT tests may not verify namespace prefix"
@@ -1461,7 +1554,7 @@ if $IS_DESTINATION_CONNECTOR; then
         fi
 
         if $IS_WAREHOUSE_DESTINATION; then
-            if grep -q "testStage\|testCopyInto\|testMerge" "$IT_TEST_FILE" 2>/dev/null; then
+            if grep -R -q --include="*IT.java" "testStage\|testCopyInto\|testMerge" "$CONNECTOR_DIR/src/test" 2>/dev/null; then
                 echo "✓ Has staging/merge test"
             else
                 echo "⚠️  WARNING: Missing staging/merge test for warehouse"
@@ -1470,7 +1563,7 @@ if $IS_DESTINATION_CONNECTOR; then
         fi
 
         if $IS_ACTIVATION_DESTINATION; then
-            if grep -q "testActivation\|testUpsert\|testApiWrite" "$IT_TEST_FILE" 2>/dev/null; then
+            if grep -R -q --include="*IT.java" "testActivation\|testUpsert\|testApiWrite" "$CONNECTOR_DIR/src/test" 2>/dev/null; then
                 echo "✓ Has activation/upsert test"
             else
                 echo "⚠️  WARNING: Missing activation test"

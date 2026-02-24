@@ -7,7 +7,9 @@
 ## Table of Contents
 
 - [Critical Anti-Patterns (Will Break Connector)](#critical-anti-patterns-will-break-connector)
+  - [8b. Missing convertToCanonicalValue Override (JDBC Connectors)](#8b-missing-converttocanonicalvalue-override-jdbc-connectors)
 - [Moderate Anti-Patterns (May Cause Issues)](#moderate-anti-patterns-may-cause-issues)
+  - [8c. Insecure TLS Default (`trustServerCertificate=true`)](#8c-insecure-tls-default-trustservercertificatetrue)
 - [Minor Anti-Patterns (Code Quality)](#minor-anti-patterns-code-quality)
 - [Quick Verification Checklist](#quick-verification-checklist)
 
@@ -310,7 +312,75 @@ List<String> properties = objectMetadata.getFields().stream()
 
 ---
 
+### 8b. Missing convertToCanonicalValue Override (JDBC Connectors)
+
+**DO NOT:**
+```java
+// Rely on the base class to handle all JDBC driver types
+// Base class calls CanonicalTypeUtil.convertToCanonicalValue() which
+// only knows about standard Java types (String, BigDecimal, Timestamp, etc.)
+```
+
+**DO:**
+```java
+@Override
+public String convertToCanonicalValue(Object value, CanonicalType canonicalType) {
+    if (value == null) {
+        return CanonicalTypeUtil.NULL_PLACEHOLDER;
+    }
+    try {
+        // Intercept proprietary driver types BEFORE they reach the base class
+        if (value.getClass().getName().startsWith("com.microsoft.sqlserver.")) {
+            return value.toString();
+        }
+        if (value.getClass().getName().startsWith("org.postgresql.")) {
+            if (value instanceof java.sql.SQLXML) {
+                return ((java.sql.SQLXML) value).getString();
+            }
+            return value.toString();
+        }
+        return super.convertToCanonicalValue(value, canonicalType);
+    } catch (Exception e) {
+        log.warn("Conversion failed for {} of type {}: {}", value, canonicalType, e.getMessage());
+        return value.toString();
+    }
+}
+```
+
+**Why**: Every JDBC driver returns proprietary Java objects for database-specific types:
+- SQL Server: `microsoft.sql.DateTimeOffset`, `Geometry`, `Geography`
+- PostgreSQL: `PGobject`, `PGInterval`, `PgArray`
+- Oracle: `oracle.sql.TIMESTAMP`, `STRUCT`
+
+The base class utility method does not know these types and throws `ClassCastException` at runtime. This is silent during schema discovery (which only reads metadata, not values) and only surfaces when actual data is read -- making it easy to miss during development if integration tests only check schema discovery.
+
+---
+
 ## Moderate Anti-Patterns (May Cause Issues)
+
+### 8c. Insecure TLS Default (`trustServerCertificate=true`)
+
+**DO NOT:**
+```java
+@Property(
+    label = "Trust Server Certificate",
+    defaultValue = "true"  // insecure by default
+)
+public String trustServerCertificate;
+```
+
+**DO:**
+```java
+@Property(
+    label = "Trust Server Certificate",
+    defaultValue = "false"  // secure default
+)
+public String trustServerCertificate;
+```
+
+**Why**: Defaulting certificate trust to `true` disables server certificate validation and can hide man-in-the-middle risks. Keep secure defaults for production and let users explicitly opt in for local/dev/self-signed setups.
+
+---
 
 ### 9. Wrong Pagination Pattern
 

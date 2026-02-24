@@ -57,6 +57,9 @@ test_credentials: STRIPE_API_KEY
 | 7 | `PHASE_7_WRITE_OPERATIONS.md` | Warehouse destinations: stage(), load() | 3, 12 |
 | 8 | `PHASE_8_ACTIVATION_TARGETS.md` | API destinations: activation mappings | 3, 12 |
 | - | `ANTI_PATTERNS.md` | Common mistakes to avoid | All |
+| JDBC | `JDBC_CONNECTOR_GUIDE.md` | **Replaces phases 3-5 for JDBC connectors** | JDBC-specific |
+
+**JDBC Connectors**: If the connector extends `BaseJdbcConnector` (uses a JDBC driver), follow `JDBC_CONNECTOR_GUIDE.md` instead of phases 3-5. The base class handles read(), schema(), cursor fields, and cancellation. You only implement `validateAndSetConnectorProperties()`, `mapTypeByName()`, `convertToCanonicalValue()`, and source-only stubs.
 
 **Destination Phases**:
 - **Phase 7**: For warehouse destinations (Snowflake, BigQuery) - creates tables/schemas via DDL
@@ -157,7 +160,8 @@ build-supaflow-connector/
 | `supaflow-connector-hubspot` | OAuth2 Auth Code | V2 architecture, YAML config |
 | `supaflow-connector-oracle-tm` | Basic Auth | Time-based incremental sync |
 | `supaflow-connector-salesforce` | OAuth2 + SOAP | Utility classes, bulk API |
-| `supaflow-connector-postgres` | JDBC | BaseJdbcConnector pattern |
+| `supaflow-connector-postgres` | JDBC | **JDBC source+destination reference** (BaseJdbcConnector, convertToCanonicalValue, mapTypeByName) |
+| `supaflow-connector-generic-jdbc` | JDBC | **JDBC source-only reference** (minimal BaseJdbcConnector subclass) |
 | `supaflow-connector-snowflake` | JDBC + Stage | **Warehouse destination (Phase 7)** |
 | `supaflow-connector-salesforce` | OAuth2 + SOAP | **Activation destination (Phase 8)** |
 | `supaflow-connector-salesforce-marketing-cloud` | OAuth2 | SFMC patterns, REST + SOAP |
