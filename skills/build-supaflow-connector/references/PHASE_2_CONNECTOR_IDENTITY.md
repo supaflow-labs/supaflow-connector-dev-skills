@@ -333,12 +333,65 @@ public Set<ConnectorCapabilities> getConnectorCapabilities() {
 
 Define detailed capabilities for the UI using ConnectorCapabilitiesConfigBuilder.
 
-**For Source Connectors:**
+### Capability Ownership (Source vs Destination vs Both)
+
+Each capability is controlled by the source connector, the destination connector, or both.
+The frontend reads the controlling connector's capability config to decide what UI options to show.
+
+| Capability | Type | Controlled By | Notes |
+|------------|------|---------------|-------|
+| `ingestionMode` | field | **source** | Only source-relevant capability |
+| `loadMode` | field | destination | -- |
+| `namespaceRules` | field | destination | -- |
+| `destinationTableHandling` | field | destination | -- |
+| `schemaEvolutionMode` | field | destination | Gated by `canAutoCreateSchema` in builder |
+| `loadOptimizationMode` | field | destination | -- |
+| `checksumValidationLevel` | field | **both** | Intersection of source and destination values |
+| `performHardDeletes` | boolean | **both** | Both source AND destination must support |
+| `triggerAutoReSyncOnNewTable` | boolean | destination | -- |
+| `triggerAutoReSyncOnNewColumn` | boolean | destination | -- |
+| `triggerAutoReSyncOnSchemaChange` | boolean | destination | -- |
+| `propagateEmptyTableSchema` | boolean | destination | -- |
+
+For "both"-controlled capabilities:
+- **Enabled check**: source AND destination must both agree (AND logic)
+- **Supported values**: intersection of source and destination values
+- **Default value**: destination takes priority
+
+**What this means for source connectors**: Most capabilities are destination-controlled, but
+sources still need a correct preset because `performHardDeletes` and `checksumValidationLevel`
+require both sides to agree, and `canAutoCreateSchema` gates several downstream capabilities.
+
+### Convenience Presets
+
+Choose the preset that matches your connector type:
+
+| Preset | Use For | Sets |
+|--------|---------|------|
+| `.asTraditionalDatabase()` | PostgreSQL, MySQL, Oracle, **SQL Server** | `canAutoCreateSchema=true`, `supportsHardDeletes=true`, `optimization=LATENCY` |
+| `.asAPIConnector()` | Salesforce, HubSpot, Airtable, REST APIs | `supportsHardDeletes=false`, `canAutoCreateSchema=false`, `rateLimit=true` |
+| `.asCloudWarehouse()` | Snowflake, BigQuery, Redshift | `optimization=COST`, modes=`COST+LATENCY` |
+
+### Examples
+
+**For API-based Source Connectors:**
 ```java
 @Override
 public ConnectorCapabilitiesConfig getCapabilitiesConfig() {
     return ConnectorCapabilitiesConfigBuilder.builder()
-        .asAPIConnector()  // Preset for API-based sources
+        .asAPIConnector()
+        .build();
+}
+```
+
+**For Database Source Connectors (PostgreSQL, SQL Server, MySQL, etc.):**
+```java
+@Override
+public ConnectorCapabilitiesConfig getCapabilitiesConfig() {
+    return ConnectorCapabilitiesConfigBuilder.builder()
+        .asTraditionalDatabase()
+        .requiresStaging(false)
+        .requiresExplicitLoadStep(false)
         .build();
 }
 ```
@@ -348,7 +401,7 @@ public ConnectorCapabilitiesConfig getCapabilitiesConfig() {
 @Override
 public ConnectorCapabilitiesConfig getCapabilitiesConfig() {
     return ConnectorCapabilitiesConfigBuilder.builder()
-        .asCloudWarehouse()  // Preset for warehouse destinations
+        .asCloudWarehouse()
         .loadModes(LoadMode.APPEND, LoadMode.MERGE)
         .defaultLoadMode(LoadMode.APPEND)
         .destinationTableHandlings(
@@ -383,11 +436,6 @@ public ConnectorCapabilitiesConfig getCapabilitiesConfig() {
         .build();
 }
 ```
-
-**Convenience Presets:**
-- `.asAPIConnector()` - For API-based sources (REST APIs, SaaS connectors)
-- `.asCloudWarehouse()` - For data warehouse destinations (Snowflake, BigQuery)
-- `.asDatabase()` - For database destinations (PostgreSQL, MySQL)
 
 **CRITICAL**: Only declare capabilities you actually implement!
 

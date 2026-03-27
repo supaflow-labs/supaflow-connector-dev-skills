@@ -230,13 +230,43 @@ public Set<ConnectorCapabilities> getConnectorCapabilities() {
 
 public ConnectorCapabilitiesConfig getCapabilitiesConfig() {
     return ConnectorCapabilitiesConfigBuilder.builder()
-        .supportsStaging(true)
-        .requiresStaging(true)
+        .asAPIConnector()  // Always start with the right preset
         .build();
 }
 ```
 
 **Why**: The executor relies on capabilities to determine what operations are available.
+
+---
+
+### 6b. Missing Connector Type Preset in getCapabilitiesConfig()
+
+**DO NOT:**
+```java
+public ConnectorCapabilitiesConfig getCapabilitiesConfig() {
+    return ConnectorCapabilitiesConfigBuilder.builder()
+        .requiresStaging(false)
+        .requiresExplicitLoadStep(false)
+        .build();  // Missing preset! Defaults are wrong for a database connector.
+}
+```
+
+**DO:**
+```java
+public ConnectorCapabilitiesConfig getCapabilitiesConfig() {
+    return ConnectorCapabilitiesConfigBuilder.builder()
+        .asTraditionalDatabase()  // Sets canAutoCreateSchema, supportsHardDeletes, optimization
+        .requiresStaging(false)
+        .requiresExplicitLoadStep(false)
+        .build();
+}
+```
+
+**Why**: Without a preset, `canAutoCreateSchema` defaults to `false`, which disables schema
+evolution mode, auto-resync capabilities, and hard deletes in the UI. This was a real bug in
+the SQL Server connector -- it was missing `.asTraditionalDatabase()` and shipped with broken
+capabilities for months. Always start with one of: `.asTraditionalDatabase()`,
+`.asAPIConnector()`, or `.asCloudWarehouse()`.
 
 ---
 
