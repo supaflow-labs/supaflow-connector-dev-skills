@@ -500,7 +500,7 @@ String cutoffTimeStr = CutoffTimeSyncUtils.formatCutoffTimeIso(request.getSyncSt
 fetchAndProcessRecords(request);
 
 // At END of read() - just call applyCutoffTimeToResult():
-RecordProcessingResult result = request.getRecordProcessor().getResult();
+RecordProcessingResult result = request.getRecordProcessor().completeProcessing();
 result = CutoffTimeSyncUtils.applyCutoffTimeToResult(result, request, cutoffTimeStr);
 
 // The utility handles:

@@ -45,18 +45,19 @@ Before proceeding, you should be able to answer:
 
 ## Step 1: Implement getType()
 
-The connector type is a unique identifier in SCREAMING_SNAKE_CASE:
+The connector type is a unique identifier, typically UPPER_CASE:
 
 ```java
 @Override
 public String getType() {
-    return "SFMC";  // or "HUBSPOT", "AIRTABLE", "ORACLE_TM", etc.
+    return "SFMC";  // or "SNOWFLAKE", "AIRTABLE", "ORACLE_TM", etc.
 }
 ```
 
 **Rules**:
-- SCREAMING_SNAKE_CASE (uppercase with underscores)
 - Must be unique across all connectors
+- Convention is uppercase with underscores (e.g., `SALESFORCE`, `ORACLE_TM`, `GOOGLE_DRIVE`)
+- Some connectors use lowercase (e.g., `hubspot`) -- the key constraint is uniqueness, not casing
 - Used in database records and API calls
 - Cannot contain spaces or special characters
 
@@ -125,25 +126,7 @@ public String getIcon() {
 
 ---
 
-## Step 4: Implement getCategory()
-
-```java
-@Override
-public ConnectorCategory getCategory() {
-    return ConnectorCategory.MARKETING;  // or CRM, DATABASE, FILE, etc.
-}
-```
-
-**Available Categories** (check `ConnectorCategory` enum):
-- `DATABASE` - PostgreSQL, Snowflake, MySQL
-- `CRM` - Salesforce, HubSpot
-- `MARKETING` - Marketing platforms
-- `FILE` - S3, SFTP, Google Drive
-- `OTHER` - Catch-all
-
----
-
-## Step 5: Define Connection Properties
+## Step 4: Define Connection Properties
 
 Properties are defined as class fields with `@Property` annotations:
 
@@ -193,7 +176,7 @@ public String subdomain;
 | `displayOrder` | int | Order in UI (0, 1, 2...) |
 | `label` | String | Field label in UI |
 | `description` | String | Help text / tooltip |
-| `type` | PropertyType | STRING, BOOLEAN, ENUM, INTEGER, OAUTH_CONFIG |
+| `type` | PropertyType | STRING, NUMERIC, BOOLEAN, ENUM, OAUTH_CONFIG |
 | `required` | boolean | Is this field required? |
 | `encrypted` | boolean | Store encrypted in database |
 | `password` | boolean | Mask input in UI |
@@ -301,7 +284,7 @@ public String tokenExpiresAt;
 
 ---
 
-## Step 6: Implement getConnectorCapabilities()
+## Step 5: Implement getConnectorCapabilities()
 
 Define the high-level capabilities your connector supports using the ConnectorCapabilities enum:
 
@@ -325,11 +308,14 @@ public Set<ConnectorCapabilities> getConnectorCapabilities() {
 **Available ConnectorCapabilities:**
 - `REPLICATION_SOURCE` - Connector can READ data (implement read(), schema())
 - `REPLICATION_DESTINATION` - Connector can WRITE data (implement stage(), load())
+- `DBT_DATASOURCE` - Can be used as datasource for dbt
+- `REVERSE_ETL_SOURCE` - Can be used as source for reverse ETL
 - `REVERSE_ETL_DESTINATION` - Connector supports reverse ETL operations
+- `SQL_SCRIPT_EXECUTION` - Supports executing SQL scripts (DML/DDL)
 
 ---
 
-## Step 7: Implement getCapabilitiesConfig() (Optional but Recommended)
+## Step 6: Implement getCapabilitiesConfig() (Optional but Recommended)
 
 Define detailed capabilities for the UI using ConnectorCapabilitiesConfigBuilder.
 
@@ -406,10 +392,10 @@ public ConnectorCapabilitiesConfig getCapabilitiesConfig() {
         .defaultLoadMode(LoadMode.APPEND)
         .destinationTableHandlings(
             DestinationTableHandling.FAIL,
-            DestinationTableHandling.REPLACE_SCHEMA,
-            DestinationTableHandling.APPEND_SCHEMA
+            DestinationTableHandling.DROP,
+            DestinationTableHandling.MERGE
         )
-        .defaultDestinationTableHandling(DestinationTableHandling.FAIL)
+        .defaultDestinationTableHandling(DestinationTableHandling.MERGE)
         .supportsStaging(true)
         .requiresStaging(true)
         .requiresExplicitLoadStep(true)  // If load() is a separate step after stage()
@@ -450,7 +436,7 @@ public ConnectorCapabilitiesConfig getCapabilitiesConfig() {
 
 ---
 
-## Step 8: Update Connector Class
+## Step 7: Update Connector Class
 
 Replace the Phase 1 shell methods with real implementations:
 
@@ -694,7 +680,7 @@ public class SfmcConnector implements SupaflowConnector {
 
 ---
 
-## Step 9: Register Connector in Parent POM (CRITICAL)
+## Step 8: Register Connector in Parent POM (CRITICAL)
 
 **CRITICAL**: The connector must be registered in the parent reactor for platform builds to include it.
 
@@ -753,7 +739,7 @@ This is why the issue goes undetected until deployment! Always verify with `-pl`
 
 ---
 
-## Step 10: Dependency Version Management
+## Step 9: Dependency Version Management
 
 ### Rule: Use Parent POM Versions When Available
 
@@ -942,7 +928,7 @@ Before proceeding to Phase 3, confirm ALL of the following:
 | ☐ getType() returns SCREAMING_SNAKE_CASE | Code review |
 | ☐ getName() returns human-readable name | Code review |
 | ☐ getIcon() loads icon or returns empty string | Compile succeeds |
-| ☐ getCategory() returns valid category | Code review |
+
 | ☐ All required properties have `required = true` | Code review |
 | ☐ Sensitive properties have `encrypted`, `password`, `sensitive` | Code review |
 | ☐ Properties have proper `displayOrder` | Code review |

@@ -216,15 +216,20 @@ field.setSourcePath("modifiedDate");           // JSON path in API response
 
 ```java
 public enum CanonicalType {
-    STRING,      // Text data
-    LONG,        // Integer numbers (64-bit)
-    DOUBLE,      // Floating point numbers
-    BOOLEAN,     // True/false
-    INSTANT,     // Timestamp with timezone (ISO 8601)
-    LOCALDATE,   // Date without time (YYYY-MM-DD)
-    LOCALTIME,   // Time without date (HH:MM:SS)
-    JSON,        // Complex/nested structures
-    BYTES        // Binary data
+    JSON,           // Complex/nested structures
+    STRING,         // Text data
+    DOUBLE,         // 64-bit floating point
+    FLOAT,          // 32-bit floating point
+    BIGDECIMAL,     // Arbitrary precision decimals (financial data)
+    LONG,           // 64-bit integers
+    INT,            // 32-bit integers
+    SHORT,          // 16-bit integers
+    BOOLEAN,        // True/false
+    INSTANT,        // Timestamp with timezone (ISO 8601)
+    LOCALDATETIME,  // Timestamp without timezone
+    LOCALDATE,      // Date without time (YYYY-MM-DD)
+    BINARY,         // Binary data (blobs, files)
+    XML             // XML documents
 }
 ```
 
@@ -233,14 +238,19 @@ public enum CanonicalType {
 | Source Type Pattern | CanonicalType | Notes |
 |--------------------|---------------|-------|
 | string, text, varchar, char | STRING | |
-| int, integer, number, bigint | LONG | Use for whole numbers |
-| float, double, decimal, numeric | DOUBLE | Use for decimals |
+| smallint, tinyint | SHORT | 16-bit integers |
+| int, integer | INT | 32-bit integers |
+| bigint, number (no decimals) | LONG | 64-bit integers |
+| float, real | FLOAT | 32-bit floating point |
+| double, double precision | DOUBLE | 64-bit floating point |
+| decimal, numeric, money | BIGDECIMAL | Arbitrary precision |
 | boolean, bool, bit | BOOLEAN | |
-| datetime, timestamp, instant | INSTANT | With timezone |
+| datetime, timestamp with tz | INSTANT | With timezone |
+| datetime2, timestamp without tz | LOCALDATETIME | Without timezone |
 | date | LOCALDATE | Date only |
-| time | LOCALTIME | Time only |
 | json, object, array, map | JSON | Complex structures |
-| binary, blob, bytes | BYTES | |
+| binary, blob, varbinary, bytea | BINARY | |
+| xml | XML | |
 
 ---
 

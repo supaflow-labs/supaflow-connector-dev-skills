@@ -227,7 +227,7 @@ public ReadResponse read(ReadRequest request) throws ConnectorException {
         log.error("Failed to read object: {}", objectName, e);
         throw new ConnectorException(
             "Failed to read " + objectName + ": " + e.getMessage(), e,
-            ConnectorException.ErrorType.DATA_READ_ERROR);
+            ConnectorException.ErrorType.IO_ERROR);
     }
 }
 ```
@@ -766,7 +766,7 @@ public ReadResponse read(ReadRequest request) throws ConnectorException {
     }
 
     // SAME pattern for ALL object types - utility handles everything
-    RecordProcessingResult result = request.getRecordProcessor().getResult();
+    RecordProcessingResult result = request.getRecordProcessor().completeProcessing();
     result = CutoffTimeSyncUtils.applyCutoffTimeToResult(result, request, cutoffTimeStr);
 
     SyncStateResponse syncStateResponse = SyncStateResponseBuilder.fromProcessingResult(
