@@ -25,7 +25,7 @@ Works with **Claude Code**, **OpenAI Codex**, and any agent that supports skill/
 **Does**
 - Walk an AI coding agent through building a complete Supaflow connector (source, warehouse destination, or activation target)
 - Enforce phased gates -- the agent cannot skip ahead until the current phase passes verification
-- Catch 20+ known anti-patterns before they reach production (e.g., calling `processor.close()`, missing `originalDataType`, tracking `maxCursorSeen` instead of `cutoffTime`)
+- Catch 20+ known anti-patterns before they reach production (e.g., calling `processor.close()`, missing `originalDataType`, using raw `maxCursorSeen` without a compatible boundary strategy)
 - Run automated verification (24 checks for source + destination connectors)
 
 **Does not**

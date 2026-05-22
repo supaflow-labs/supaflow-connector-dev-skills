@@ -241,11 +241,21 @@ public ReadResponse read(ReadRequest request) throws ConnectorException {
 
 ---
 
-## Step 2: Implement Incremental Sync with CutoffTime Pattern
+## Step 2: Choose the Right Incremental Boundary Strategy
 
-### CRITICAL: Use cutoffTime, NOT maxCursorSeen
+Do not treat incremental sync as one universal pattern. Pick the
+strategy that matches the source:
 
-**DO NOT** track the maximum cursor value seen in records. This is a common anti-pattern that breaks when:
+| Source shape | Recommended strategy | State carrier |
+|--------------|----------------------|---------------|
+| API supports a trustworthy bounded window (`start <= cursor < cutoff`) | `cutoffTime` / bounded window | `IncrementalField.value` + optional `maxValueSeen` |
+| Source can reliably count rows at the saved cursor value | cursor counting | `IncrementalField.recordCount` |
+| Source only supports a lower bound (`>= cursor`) and cannot reliably count boundary rows | boundary hashes | `SyncState.customState["incremental_boundary"]` |
+
+### Strategy A: Use cutoffTime for bounded-window sources
+
+**DO NOT** use raw `maxCursorSeen` as your only state for a bounded
+window connector. This breaks when:
 - API returns null cursor values for some records
 - Records arrive out of order
 - Cursor field is missing from some records
@@ -410,6 +420,53 @@ private String toApiFilter(List<FilterCondition> filters) {
         .collect(Collectors.joining(" AND "));
 }
 ```
+
+### Strategy B: Use cursor counting when the source can count boundary rows
+
+Use this when the source can cheaply and correctly answer a query like:
+
+```sql
+SELECT COUNT(*) FROM table WHERE cursor_field = :saved_cursor
+```
+
+Pattern:
+- Persist the canonical cursor in `IncrementalField.value`
+- Persist the number of rows at that value in `IncrementalField.recordCount`
+- On the next run:
+  - if current count == saved count, use `>`
+  - if current count > saved count, use `>=`
+
+This is the right fit for JDBC-style sources that can do a reliable
+boundary count.
+
+### Strategy C: Use boundary hashes when the source cannot count boundary rows
+
+Some APIs only support a lower bound like `>= cursor` and cannot
+reliably count rows at the boundary value. In that case, keep the
+canonical cursor in `IncrementalField.value` and store the extra
+dedup memory in `SyncState.customState`.
+
+Recommended shape:
+
+```json
+{
+  "incremental_boundary": {
+    "version": 1,
+    "strategy": "unique_hashes",
+    "hash_basis": "connector_pk_v1",
+    "hashes": ["...", "..."]
+  }
+}
+```
+
+Rules:
+- Do not duplicate the cursor value in `customState`
+- Preserve unrelated `customState` namespaces when updating your own
+- Keep `hash_basis` stable for that connector
+- Prefer `recordCount` over hashes when counting is available
+
+This pattern is appropriate for connectors that would otherwise get
+stuck replaying equal-cursor bursts forever.
 
 ### Why cutoffTime Works
 
@@ -888,7 +945,7 @@ Before proceeding to Phase 6, show:
 | **Calling processor.close()** | Executor manages lifecycle | Never call close |
 | **Ignoring SyncState** | Every sync is full sync | Always check isInitialSync/cursorPosition |
 | **Ignoring lookbackTimeSeconds** | Misses late-arriving data | Use `CutoffTimeSyncUtils.buildFiltersWithCutoff()` |
-| **Tracking maxCursorSeen from records** | Breaks when API returns null cursor values | Use `CutoffTimeSyncUtils.applyCutoffTimeToResult()` |
+| **Using raw maxCursorSeen without a boundary strategy** | Breaks on null cursors, equal-cursor bursts, or non-deterministic windows | Use `cutoffTime`, `recordCount`, or `customState.incremental_boundary` based on source behavior |
 | **Manually building cursor position** | Error-prone, inconsistent | Use `CutoffTimeSyncUtils` - it handles all cases |
 | **Wrong pagination** | Missing data or infinite loops | Match API's actual pagination pattern |
 | **Ignoring historicalSyncStartDate** | Syncs too much data | Apply on initial sync |

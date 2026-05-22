@@ -468,7 +468,7 @@ private String applyLookback(String cursor, Long lookbackSeconds) {
 
 ---
 
-### 9b. Tracking maxCursorSeen Instead of Using cutoffTime (CRITICAL)
+### 9b. Using Raw maxCursorSeen as the Only Boundary State (CRITICAL)
 
 **DO NOT:**
 ```java
@@ -490,7 +490,7 @@ result.newCursorPosition = maxCursorSeen.toString();  // WRONG!
 
 **DO:**
 ```java
-// CORRECT: Use CutoffTimeSyncUtils - it handles everything!
+// CORRECT for bounded-window APIs: use CutoffTimeSyncUtils
 import io.supaflow.connector.sdk.util.CutoffTimeSyncUtils;
 
 // At START of read():
@@ -504,20 +504,36 @@ RecordProcessingResult result = request.getRecordProcessor().completeProcessing(
 result = CutoffTimeSyncUtils.applyCutoffTimeToResult(result, request, cutoffTimeStr);
 
 // The utility handles:
-// - Records with cursor values → replaces with cutoffTime
-// - Records with null cursor values → creates end fields from cutoffTime
-// - Zero records → advances cursor appropriately
+// - Records with cursor values -> replaces with cutoffTime
+// - Records with null cursor values -> creates end fields from cutoffTime
+// - Zero records -> advances cursor appropriately
 ```
 
-**Why**: Tracking maxCursorSeen breaks when:
+For other source shapes:
+
+```java
+// CORRECT for countable lower-bound sources:
+// keep the cursor in IncrementalField.value and the boundary count in
+// IncrementalField.recordCount so the next run can choose > vs >=.
+
+// CORRECT for non-countable lower-bound sources:
+// keep the cursor in IncrementalField.value and carry boundary dedup
+// state in SyncState.customState["incremental_boundary"].
+```
+
+**Why**: raw maxCursorSeen breaks when:
 - API returns null cursor values for some records
 - Records arrive out of order
 - Cursor field is missing from some records
 - Creates non-deterministic sync windows
+- Replays equal-cursor bursts forever when the source only supports `>= cursor`
 
-The cutoffTime is set by the executor BEFORE read() is called and represents a deterministic upper bound for the sync window. Using it as the new cursor value ensures no data is missed.
+Choose the strategy that matches the source:
+- bounded window available: `cutoffTime`
+- boundary count available: `recordCount`
+- boundary count unavailable: `customState.incremental_boundary`
 
-**See**: Phase 5 documentation, Section 5.2 "CutoffTime Pattern"
+**See**: Phase 5 documentation, Step 2 "Choose the Right Incremental Boundary Strategy"
 
 ---
 
@@ -793,7 +809,7 @@ git ls-files | grep "^target/"
 | Wrong capabilities declared | CRITICAL | Code review |
 | No primary key | CRITICAL | `grep setPrimaryKey` |
 | **Hardcoded field parsing** | **CRITICAL** | Schema fields != parsed fields |
-| **Tracking maxCursorSeen (not cutoffTime)** | **CRITICAL** | `grep maxCursorSeen` |
+| **Using raw maxCursorSeen without a boundary strategy** | **CRITICAL** | `grep maxCursorSeen` |
 | Wrong pagination | MODERATE | Manual test |
 | Ignoring lookbackTimeSeconds | MODERATE | `grep lookback` |
 | No context for read() | MODERATE | Check customAttributes |

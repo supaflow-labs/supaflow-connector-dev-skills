@@ -20,6 +20,8 @@ Build connectors phase-by-phase, enforce verification gates before moving forwar
 - `api_surface`: object endpoints, pagination model, rate limits, and date/cursor fields
 - `test_credentials`: required env vars and sandbox/test account scope
 
+If the task also includes customer-facing connector docs or marketing pages in `supaflow-www`, you must also load `references/CONNECTOR_DOCS_MARKETING.md` before drafting or reviewing them.
+
 ## Phase 0: Mandatory Reading (Do This First, No Exceptions)
 
 Before writing any code, read these files in full. Do not skip this step. Do not summarize or skim.
@@ -122,6 +124,14 @@ mvn clean install
 - For destinations, implement required destination methods and identifier formatter methods expected by mapping/pipeline.
 - JDBC connectors MUST override `convertToCanonicalValue()` to handle database-specific Java types returned by the JDBC driver. Without this, proprietary types (e.g., `microsoft.sql.DateTimeOffset`, `org.postgresql.util.PGobject`) cause ClassCastException at runtime.
 - Keep integration tests meaningful: incremental windows, cursor advancement, and schema-to-record field coverage.
+- For connector docs and marketing, existing clean docs are the template; connector code is only the validation source.
+- For connector docs and marketing, do not put object lists, sync modes, cursor fields, or internal columns in the opening paragraph.
+- For connector docs and marketing, treat protocol details, raw internal identifiers, endpoint paths, API-version/query-shape discussion, and versioned product wording like `v1 connector` as red flags unless the user truly needs them.
+- For connector docs and marketing, use the standard rate-limit pattern from `references/CONNECTOR_DOCS_MARKETING.md` instead of baking source-specific limit numbers into the page.
+- For connector marketing pages, remember they are template-driven `ConnectorMarketing` entries, not freeform docs. Keep copy shaped to the existing template fields.
+- For connector marketing pages, `setupSteps.detail` and `faq.answer` are plain-text surfaces. Do not rely on markdown formatting or long copied vendor workflows there.
+- For protected scopes, approval-only permissions, or other vendor-controlled access steps in docs/marketing, explain the requirement briefly, explain why it matters, and point to official docs instead of restating the mutable vendor workflow.
+- For source-doc configuration sections, use `FieldLabel ... required` for required fields, use `Options:` for enum values, and group advanced settings only when it improves scanning.
 
 ## Completion Criteria
 
@@ -131,4 +141,6 @@ mvn clean install
 - Verification script passes all applicable checks (`1-15` for source, plus `16-24` for destinations).
 - Verification script re-run after integration tests are written (not just at end of build).
 - Anti-pattern checks reviewed before final handoff.
+- If the task includes connector docs or marketing, `references/CONNECTOR_DOCS_MARKETING.md` was followed and a red-flag sweep was completed before final handoff.
+- If the task includes connector marketing pages, a template-surface pass was completed to confirm the copy fits the actual renderer and data shape.
 - Final handoff includes what was implemented, gate outputs, and any remaining risks/assumptions.
