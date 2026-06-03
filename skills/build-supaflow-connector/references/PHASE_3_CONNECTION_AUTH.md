@@ -80,7 +80,11 @@ Simplest pattern - user provides a static token:
 
 ```java
 // Property
-@Property(label = "API Token", type = PropertyType.STRING,
+@Property(displayOrder = 0,
+          label = "API Token",
+          description = "API token used to authenticate requests",
+          type = PropertyType.STRING,
+          propertyGroup = "Authentication",
           encrypted = true, password = true, sensitive = true, required = true)
 public String apiToken;
 
@@ -119,7 +123,7 @@ User-interactive authentication (like Airtable, HubSpot):
 Create a helper class for HTTP operations:
 
 ```java
-package io.supaflow.connectors.{name}.client;
+package io.supaflow.connector.{name}.client;
 
 import okhttp3.MediaType;
 import okhttp3.OkHttpClient;
@@ -243,7 +247,7 @@ public class {Name}RestClient {
 For connectors using Client Credentials flow:
 
 ```java
-package io.supaflow.connectors.{name}.auth;
+package io.supaflow.connector.{name}.auth;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -444,12 +448,10 @@ public DatasourceInitResponse init(Map<String, Object> connectionProperties) thr
 
         log.info("{} connector initialized and connection tested successfully", getName());
 
-        return DatasourceInitResponse.builder()
-            .success(true)
-            .productName(productName)
-            .productVersion(productVersion)
-            .message("Connection successful")
-            .build();
+        DatasourceInitResponse response = new DatasourceInitResponse();
+        response.setDatasourceProductName(productName);
+        response.setDatasourceProductVersion(productVersion);
+        return response;
 
     } catch (ConnectorException e) {
         log.error("Connection test failed for {}: {}", getName(), e.getMessage());
@@ -512,8 +514,14 @@ private OkHttpClient createHttpClient() {
     // Apply proxy configuration if available from runtime context
     if (runtimeContext != null && runtimeContext.getHttpClientConfig() != null) {
         HttpClientConfig config = runtimeContext.getHttpClientConfig();
-        if (config.getProxy() != null) {
-            builder.proxy(config.getProxy());
+        if (config.isProxyEnabled() && config.getProxyHost() != null) {
+            java.net.Proxy.Type type = "SOCKS".equalsIgnoreCase(config.getProxyType())
+                ? java.net.Proxy.Type.SOCKS
+                : java.net.Proxy.Type.HTTP;
+            builder.proxy(new java.net.Proxy(
+                type,
+                new java.net.InetSocketAddress(config.getProxyHost(), config.getProxyPort())
+            ));
         }
     }
 
@@ -544,12 +552,10 @@ For failed validation, throw `ConnectorException` with the correct `ErrorType`.
 
 ```java
 // Success response
-return DatasourceInitResponse.builder()
-    .success(true)
-    .productName("Salesforce Marketing Cloud")
-    .productVersion("API v1")
-    .message("Connection successful")
-    .build();
+DatasourceInitResponse response = new DatasourceInitResponse();
+response.setDatasourceProductName("Salesforce Marketing Cloud");
+response.setDatasourceProductVersion("API v1");
+return response;
 
 // Failure path
 throw new ConnectorException(
@@ -561,11 +567,12 @@ throw new ConnectorException(
 
 | Field | Description | Required | Example |
 |-------|-------------|----------|---------|
-| `success` | Whether connection succeeded | Yes | `true` |
-| `productName` | Product name | No (but recommended) | "Salesforce Marketing Cloud" |
-| `productVersion` | Version info | No | "API v1" |
-| `message` | Status message | No | "Connection successful" |
-| `metadata` | Additional info | No | Custom map of values |
+| `datasourceProductName` | Product name | No (but recommended) | "Salesforce Marketing Cloud" |
+| `datasourceProductVersion` | Version info | No | "API v1" |
+| `defaultCatalog` | Default catalog/database name | No | "main" |
+| `defaultSchema` | Default schema name | No | "public" |
+| `datasourceMetadata` | Catalog/schema metadata | No | List of `CatalogMetadata` |
+| `datasourceProperties` | Additional datasource properties | No | Map of key/value metadata |
 
 ---
 
@@ -712,12 +719,11 @@ private JsonNode executeWithRetry(Request request, int maxRetries) throws IOExce
 ### Automated Checks
 
 ```bash
-# 1. Compile the project
-cd connectors/supaflow-connector-{name}
-mvn compile
+# 1. Compile from the platform root with reactor dependencies
+cd <platform-root>
+mvn -pl connectors/supaflow-connector-{name} -am compile
 
 # 2. Run verification script
-cd ../..
 bash <skill-root>/scripts/verify_connector.sh {name} <platform-root>
 ```
 
@@ -763,7 +769,7 @@ export {NAME}_SUBDOMAIN="your-subdomain"
 
 Before proceeding to Phase 4, show:
 
-1. Output of `mvn compile`
+1. Output of `mvn -pl connectors/supaflow-connector-{name} -am compile`
 2. Output of `bash <skill-root>/scripts/verify_connector.sh {name} <platform-root>` (CHECKs 7, 10)
 3. Confirmation that init() works with real credentials
 4. Token management approach (caching, refresh strategy)

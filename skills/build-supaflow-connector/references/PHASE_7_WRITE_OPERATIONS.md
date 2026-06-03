@@ -1,10 +1,10 @@
-# Phase 7: Write Operations (Destination Connectors)
+# Phase 7: Write Operations (Structured Destination Connectors)
 
 **Objective**: Implement destination connector capabilities: stage(), load(), executeSqlScript(), mapToTargetObject(), and getCapabilitiesConfig().
 
 **Time Estimate**: 120-180 minutes
 
-**Prerequisite**: Phases 1-6 completed. This phase is ONLY for connectors that support being a destination (not source-only connectors).
+**Prerequisite**: Phase 1 and Phase 2 completed, plus the applicable source/JDBC setup. This phase is ONLY for connectors that support being a structured destination (database, warehouse, or file/lake destination), not source-only connectors and not activation/API destinations.
 
 ---
 
@@ -50,6 +50,8 @@ Even destination-only connectors must implement identifier formatting methods be
 - `validateReadRequest(...)`
 - `identifyCursorFields(...)`
 
+**JDBC destination note:** `BaseJdbcConnector` already implements `getIdentifierFormatter()`, `getFullyQualifiedSchemaName(...)`, and `getFullyQualifiedTableName(...)` using connector-specific quote/separator/catalog/schema settings. For JDBC destinations, read those inherited methods and the Postgres direct database implementation before adding private mapping helpers.
+
 ---
 
 ## Prerequisites
@@ -68,13 +70,14 @@ Even destination-only connectors must implement identifier formatting methods be
 | `supaflow-connector-sdk/.../model/SqlScriptRequest.java` | SQL script request | Inputs for SQL execution |
 | `supaflow-connector-sdk/.../model/SqlScriptResponse.java` | SQL script response | What to return after execution |
 | `supaflow-connector-sdk/.../util/ConnectorCapabilitiesConfigBuilder.java` | Capabilities builder | How to define connector capabilities |
-| `supaflow-connector-snowflake/.../SnowflakeConnector.java` | Reference implementation | Complete destination example |
+| `supaflow-connector-postgres/.../PostgresConnector.java` | Direct database reference | JDBC destination with no external staging |
+| `supaflow-connector-snowflake/.../SnowflakeConnector.java` | Staged warehouse reference | Warehouse destination with stage + load |
 
 ### Find and Read SDK Classes
 
 ```bash
 PLATFORM_ROOT="<platform-root>"
-REFERENCE_DESTINATION_CONNECTOR="${REFERENCE_DESTINATION_CONNECTOR:-snowflake}"
+REFERENCE_DESTINATION_CONNECTOR="${REFERENCE_DESTINATION_CONNECTOR:-postgres}"
 
 # MUST read these files before proceeding
 find "$PLATFORM_ROOT" -name "StageRequest.java" -path "*/supaflow-connector-sdk/*" -exec cat {} \;
@@ -84,7 +87,9 @@ find "$PLATFORM_ROOT" -name "LoadResponse.java" -path "*/supaflow-connector-sdk/
 find "$PLATFORM_ROOT" -name "SqlScriptRequest.java" -path "*/supaflow-connector-sdk/*" -exec cat {} \;
 find "$PLATFORM_ROOT" -name "ConnectorCapabilitiesConfigBuilder.java" -path "*/supaflow-connector-sdk/*" -exec cat {} \;
 
-# Read Snowflake connector as reference
+# Read the destination connector reference that matches your target pattern.
+# Use postgres for direct JDBC database destinations such as SQL Server.
+# Use snowflake for staged warehouse destinations.
 grep -A 100 "public StageResponse stage(" \
   "$PLATFORM_ROOT"/connectors/supaflow-connector-"$REFERENCE_DESTINATION_CONNECTOR"/src/main/java/**/*.java
 grep -A 100 "public LoadResponse load(" \
@@ -124,7 +129,7 @@ Before proceeding, you MUST be able to answer:
 │  1. Calls read() on SOURCE connector                            │
 │  2. Writes data to local CSV files                              │
 │  3. Calls mapToTargetObject() on DESTINATION connector          │
-│  4. Calls stage() to upload data to staging area                │
+│  4. Calls stage() to upload data, or receive no-op for direct DB│
 │  5. Calls load() to load data into final tables                 │
 │  6. May call executeSqlScript() for custom operations           │
 └─────────────────────────────────────────────────────────────────┘
@@ -134,8 +139,8 @@ Before proceeding, you MUST be able to answer:
 │                    DESTINATION CONNECTOR                         │
 │                                                                  │
 │  mapToTargetObject(): Map source schema to target format        │
-│  stage():   Upload CSV files to staging location (e.g., S3)     │
-│  load():    Copy from staging to final tables (COPY/MERGE)      │
+│  stage():   Upload CSV files, or no-op for direct DB load       │
+│  load():    Load local/staged data, then apply load mode        │
 │  executeSqlScript(): Execute arbitrary SQL                      │
 │                                                                  │
 │  getCapabilitiesConfig(): Define what the connector supports    │
@@ -169,6 +174,29 @@ Before proceeding, you MUST be able to answer:
 
 This defines what your connector supports and is used by the UI to show/hide options.
 
+Choose the capability shape that matches the destination implementation. Do not copy the staged warehouse settings into a direct JDBC database destination.
+
+### Direct JDBC Database Destination (Postgres, SQL Server)
+
+```java
+@Override
+public ConnectorCapabilitiesConfig getCapabilitiesConfig() {
+    return ConnectorCapabilitiesConfigBuilder.builder()
+        .asTraditionalDatabase()
+        .requiresStaging(false)
+        .requiresExplicitLoadStep(true)
+        .canAutoCreateSchema(true)
+        .supportsHardDeletes(true)
+        // Include only if the connector's CSV loader supports this marker.
+        .supportedNullIf(List.of("\\N"))
+        .build();
+}
+```
+
+For this pattern, `stage()` returns `StageResponse.noOp(...)`; `load()` reads `request.getLocalDataPath()` directly.
+
+### Staged Warehouse/File Destination
+
 ```java
 @Override
 public ConnectorCapabilitiesConfig getCapabilitiesConfig() {
@@ -189,7 +217,7 @@ public ConnectorCapabilitiesConfig getCapabilitiesConfig() {
         .schemaEvolutionModes(SchemaEvolutionMode.ALLOW_ALL, SchemaEvolutionMode.ALLOW_NEW_COLUMNS_ONLY)
         .defaultSchemaEvolutionMode(SchemaEvolutionMode.ALLOW_ALL)
 
-        // Staging (for cloud warehouses)
+        // Staging (for cloud warehouses/file destinations that upload first)
         .supportsStaging(true)
         .requiresStaging(true)  // Set to true if staging is mandatory
         .requiresExplicitLoadStep(true)
@@ -213,7 +241,7 @@ public ConnectorCapabilitiesConfig getCapabilitiesConfig() {
 .asCloudWarehouse()
 // Sets: optimization=COST, modes=COST+LATENCY
 
-// Traditional database (PostgreSQL, MySQL, Oracle)
+// Traditional database (PostgreSQL, SQL Server, MySQL, Oracle)
 .asTraditionalDatabase()
 // Sets: canAutoCreateSchema=true, hardDeletes=true, optimization=LATENCY
 
@@ -228,19 +256,19 @@ public ConnectorCapabilitiesConfig getCapabilitiesConfig() {
 
 Maps source object metadata to destination-compatible format.
 
-### ⚠️ CRITICAL REQUIREMENTS
+### Critical Requirements
 
 **YOU MUST:**
-1. ✅ Apply `NamespaceRules` for schema/table/column names (includes pipeline prefix)
-2. ✅ Preserve `customAttributes` from source object (connector-specific metadata, not sync metadata)
-3. ✅ Normalize identifiers per connector conventions (lowercase, uppercase, etc.)
+1. Apply `NamespaceRules` for schema/table/column names (includes pipeline prefix)
+2. Preserve `customAttributes` from source object (connector-specific metadata, not sync metadata)
+3. Normalize identifiers per connector conventions (lowercase, uppercase, etc.)
 
 **YOU MUST NOT:**
-1. ❌ Add tracking columns (`_supa_synced`, `_supa_job_id`, `_supa_deleted`)
+1. Add tracking columns (`_supa_synced`, `_supa_job_id`, `_supa_deleted`)
    - The platform's writer/schema mapper adds these automatically
    - Adding them here will cause duplicates and break schema generation
 
-2. ❌ Ignore `NamespaceRules` parameters
+2. Ignore `NamespaceRules` parameters
    - Pipeline prefix MUST be applied via NamespaceRules
    - Ignoring this causes tables to have wrong names in destination
 
@@ -387,11 +415,14 @@ private FieldMetadata mapToTargetField(ObjectMetadata sourceObj,
     mappedField.setName(targetColumnName);
     mappedField.setDescription(sourceField.getDescription());
     mappedField.setSelected(sourceField.getSelected());
-    mappedField.setNullable(sourceField.getNullable());
-    mappedField.setPrimaryKey(sourceField.isPrimaryKey());
-    mappedField.setSourcePrimaryKey(sourceField.isSourcePrimaryKey());
-    mappedField.setCursorField(sourceField.isCursorField());
-    mappedField.setSourcePath(sourceField.getSourcePath());
+    mappedField.setNillable(sourceField.getNillable());
+    mappedField.setPrimaryKey(sourceField.getPrimaryKey());
+    mappedField.setSourcePrimaryKey(sourceField.getSourcePrimaryKey());
+    mappedField.setPrimaryKeyCapable(sourceField.getPrimaryKeyCapable());
+    mappedField.setCursorField(sourceField.getCursorField());
+    mappedField.setSourceCursorField(sourceField.getSourceCursorField());
+    mappedField.setCursorCapable(sourceField.getCursorCapable());
+    mappedField.setFilterable(sourceField.getFilterable());
 
     // Map canonical type (may widen if existing field has wider type)
     CanonicalType targetType = sourceField.getCanonicalType();
@@ -404,8 +435,10 @@ private FieldMetadata mapToTargetField(ObjectMetadata sourceObj,
     }
     mappedField.setCanonicalType(targetType);
 
-    // Map to connector-specific data type
-    String nativeType = mapCanonicalToNativeType(targetType, sourceField.getPrecision(), sourceField.getScale());
+    // Map to connector-specific data type. This is a connector-private helper,
+    // not a BaseJdbcConnector hook. Follow PostgresDataTypeMapper's static pattern.
+    String nativeType = {Name}DataTypeMapper.mapFromCanonicalType(
+        targetType, sourceField.getPrecision(), sourceField.getScale());
     mappedField.setOriginalDataType(nativeType);
 
     // Copy precision/scale
@@ -415,18 +448,24 @@ private FieldMetadata mapToTargetField(ObjectMetadata sourceObj,
     return mappedField;
 }
 
-/**
- * Maps canonical type to native database type.
- * MUST be implemented by each connector.
- */
-protected abstract String mapCanonicalToNativeType(CanonicalType type, Integer precision, Integer scale);
+// Implement {Name}DataTypeMapper.mapFromCanonicalType(...) in the connector module,
+// or call the existing connector-specific mapper directly if one already exists.
 ```
 
 ---
 
 ## Step 3: Implement stage()
 
-Uploads data files to a staging location (cloud storage, internal stage, etc.).
+For direct JDBC database destinations, `stage()` is a no-op because `load()` reads local CSV files directly from `LoadRequest.getLocalDataPath()`.
+
+```java
+@Override
+public StageResponse stage(StageRequest request) throws ConnectorException {
+    return StageResponse.noOp("Direct database load - no staging required");
+}
+```
+
+For staged warehouse/file destinations, upload data files to a staging location (cloud storage, internal stage, etc.) and return the actual stage location for `load()`.
 
 ```java
 @Override
@@ -467,10 +506,6 @@ protected String uploadToStage(String localDataPath,
     // 1. Upload files to S3 bucket
     // 2. Return S3 path (e.g., "s3://bucket/prefix/")
 
-    // Example for direct load (no staging):
-    // 1. Return null or empty string
-    // 2. load() will read directly from localDataPath
-
     throw new UnsupportedOperationException("uploadToStage must be implemented");
 }
 ```
@@ -487,11 +522,13 @@ public StageResponse stage(StageRequest request) throws ConnectorException {
 }
 ```
 
+Do not return `StageResponse.success("No data to stage")` for a direct database destination. A success response with a string argument represents a stage location; use `StageResponse.noOp(...)` when no stage exists.
+
 ---
 
 ## Step 4: Implement load()
 
-Loads data from staging into target tables.
+Loads data into target tables. Direct JDBC database destinations read local CSV files from `request.getLocalDataPath()`. Staged warehouse/file destinations read from `request.getStageLocation()`.
 
 ```java
 @Override
@@ -558,6 +595,22 @@ public LoadResponse load(LoadRequest request) throws ConnectorException {
     }
 }
 ```
+
+### Direct JDBC Database Load (Postgres Pattern)
+
+Use this pattern for SQL Server-style database destinations:
+
+1. Validate `metadataMapping`, `callback`, `fileFormat`, and `localDataPath`.
+2. Handle `request.isDdlOnly()` and `request.isZeroRows()` before requiring data files.
+3. Populate formatted names on the mapped target metadata.
+4. Create schema and an in-database staging table.
+5. Discover only `success_part_*.csv` under `request.getLocalDataPath()`.
+6. Bulk-load those local files into the staging table.
+7. Set tracking columns from `request.getSyncTime()` and `request.getJobDetailsId()`.
+8. Execute the requested `LoadMode` and `DestinationTableHandling`.
+9. Drop staging tables in a `finally` block.
+
+Do not implement SQL Server destination loading as an external-stage upload unless the connector actually uses an external stage. SQL Server should adapt the Postgres direct-load structure to SQL Server DDL, bulk insert/copy mechanics, and `MERGE` syntax.
 
 ### Execute COPY INTO (Cloud Warehouses)
 
@@ -754,7 +807,7 @@ public SqlScriptResponse executeSqlScript(SqlScriptRequest request) throws Conne
 
 ---
 
-## Step 5.5: Propagating Sync Metadata (syncTime, sync_id) ⭐ CRITICAL
+## Step 5.5: Propagating Sync Metadata (syncTime, sync_id) Critical
 
 ### The Problem
 
@@ -765,17 +818,17 @@ Destination connectors need to use the **SAME** sync metadata as ingestion:
 
 **ANTI-PATTERN**: Using `Instant.now()` or `UUID.randomUUID()` creates inconsistency:
 ```java
-// ❌ WRONG - Different time than ingestion
+// WRONG - Different time than ingestion
 Instant syncTime = Instant.now();  // Will be different in stage() vs load()
 
-// ❌ WRONG - Not the actual job ID
+// WRONG - Not the actual job ID
 String syncId = UUID.randomUUID().toString();  // Random, not job_id
 String syncId = jobContext.toString();  // Object reference, not ID
 ```
 
-### The Solution: Use request.syncTime + Job ID
+### The Solution: Use request.syncTime + request.jobDetailsId
 
-The pipeline sets `syncTime` on both `StageRequest` and `LoadRequest`. Treat it as required and use it everywhere (partitions, tracking columns, Glue metadata). Do not compute your own syncTime in the connector.
+The pipeline sets `syncTime` and `jobDetailsId` on both `StageRequest` and `LoadRequest`. Treat them as required where the destination writes partition metadata or tracking columns. Do not compute your own sync time or sync ID in the connector.
 
 ```java
 @Override
@@ -785,7 +838,11 @@ public StageResponse stage(StageRequest request) throws ConnectorException {
         throw new ConnectorException("syncTime is required in StageRequest",
             ConnectorException.ErrorType.VALIDATION_ERROR);
     }
-    String syncId = resolveSyncId();
+    String syncId = request.getJobDetailsId();
+    if (syncId == null || syncId.isBlank()) {
+        throw new ConnectorException("jobDetailsId is required in StageRequest",
+            ConnectorException.ErrorType.VALIDATION_ERROR);
+    }
 
     // Use this syncTime for:
     // - Partition values (year/month/day/hour)
@@ -800,7 +857,11 @@ public LoadResponse load(LoadRequest request) throws ConnectorException {
         throw new ConnectorException("syncTime is required in LoadRequest",
             ConnectorException.ErrorType.VALIDATION_ERROR);
     }
-    String syncId = resolveSyncId();
+    String syncId = request.getJobDetailsId();
+    if (syncId == null || syncId.isBlank()) {
+        throw new ConnectorException("jobDetailsId is required in LoadRequest",
+            ConnectorException.ErrorType.VALIDATION_ERROR);
+    }
 
     // Use for Glue partitions, table metadata, MERGE conditions, etc.
 }
@@ -809,17 +870,13 @@ public LoadResponse load(LoadRequest request) throws ConnectorException {
 #### 2. Getting sync_id
 
 ```java
-private String resolveSyncId() {
-    Object jobContext = runtimeContext.getJobContext();
-
-    if (jobContext instanceof Job) {
-        // CORRECT - Get actual job ID
-        return ((Job) jobContext).getId();
+private String getSyncId(LoadRequest request) throws ConnectorException {
+    String syncId = request.getJobDetailsId();
+    if (syncId == null || syncId.isBlank()) {
+        throw new ConnectorException("jobDetailsId is required in LoadRequest",
+            ConnectorException.ErrorType.VALIDATION_ERROR);
     }
-
-    // Fallback (shouldn't happen)
-    log.warn("JobContext is not a Job instance, using fallback sync_id");
-    return UUID.randomUUID().toString();
+    return syncId;
 }
 ```
 
@@ -847,18 +904,18 @@ partitionValues.put("SYNC_ID", syncId);
 ### Why This Matters
 
 Without consistent sync metadata:
-- ❌ Partitions have inconsistent timestamps
-- ❌ `_supa_synced_at` doesn't match actual sync time
-- ❌ `sync_id` is random, can't track data lineage
-- ❌ Incremental syncs may skip or duplicate data
+- Partitions have inconsistent timestamps
+- `_supa_synced_at` doesn't match actual sync time
+- `sync_id` is random, can't track data lineage
+- Incremental syncs may skip or duplicate data
 
 ---
 
-## Step 5.6: CSV File Discovery in stage() ⭐ CRITICAL
+## Step 5.6: CSV File Discovery in stage() or load() Critical
 
 ### The Problem
 
-The platform writes CSV files with a specific naming convention, but the pattern is not obvious.
+The platform writes CSV files with a specific naming convention, but the pattern is not obvious. Staged warehouse/file destinations usually discover these files in `stage()`. Direct JDBC database destinations discover them in `load()`.
 
 ### Platform CSV Naming Convention
 
@@ -866,12 +923,12 @@ The executor writes TWO types of CSV files to `localDataPath`:
 
 | File Pattern | Contents | Usage |
 |--------------|----------|-------|
-| `success_part_*.csv` | Successfully processed records | ✅ Upload these to destination |
-| `error_part_*.csv` | Records that failed processing | ❌ DO NOT upload these |
+| `success_part_*.csv` | Successfully processed records | Upload these to destination |
+| `error_part_*.csv` | Records that failed processing | DO NOT upload these |
 
 **ANTI-PATTERN**: Looking for `<table_name>_*.csv`:
 ```java
-// ❌ WRONG - This pattern doesn't match platform output
+// WRONG - This pattern doesn't match platform output
 filter(p -> p.getFileName().toString().startsWith(tableName + "_"))
 ```
 
@@ -889,7 +946,7 @@ public StageResponse stage(StageRequest request) throws ConnectorException {
             .filter(Files::isRegularFile)
             .filter(p -> {
                 String filename = p.getFileName().toString();
-                // ✅ CORRECT - Match platform naming
+                // CORRECT - Match platform naming
                 return filename.startsWith("success_part_") && filename.endsWith(".csv");
             })
             .collect(Collectors.toList());
@@ -897,18 +954,19 @@ public StageResponse stage(StageRequest request) throws ConnectorException {
 
     if (csvFiles.isEmpty()) {
         log.info("No data files to stage");
-        return StageResponse.success("No data to stage");
+        return StageResponse.noOp("No data files to stage");
     }
 
     log.info("Found {} CSV files to stage", csvFiles.size());
 
     // Process each CSV file
+    String stageLocation = buildStageLocation(request);
     for (Path csvFile : csvFiles) {
         checkCancellation("file upload");
-        uploadToStaging(csvFile, request);
+        uploadToStaging(csvFile, stageLocation, request);
     }
 
-    return StageResponse.success("Staged " + csvFiles.size() + " files");
+    return StageResponse.success(stageLocation);
 }
 ```
 
@@ -927,10 +985,10 @@ List<Path> csvFiles = Files.walk(localDataPath)
 ### Why This Matters
 
 Without correct CSV discovery:
-- ❌ `stage()` finds no files, uploads nothing
-- ❌ Load fails silently (no data in staging area)
-- ❌ Tests pass with simplified filenames but production fails
-- ❌ Error records get uploaded to destination
+- `stage()` finds no files, uploads nothing
+- Load fails silently (no data in staging area)
+- Tests pass with simplified filenames but production fails
+- Error records get uploaded to destination
 
 ---
 
@@ -969,7 +1027,30 @@ public Set<ConnectorCapabilities> getConnectorCapabilities() {
 
 ---
 
-## Snowflake Reference Implementation Summary
+## Direct Database Reference Implementation Summary
+
+The PostgreSQL connector uses direct local CSV loading:
+
+```
+1. stage()
+   └── StageResponse.noOp(...) because there is no external stage
+
+2. load()
+   ├── DDL-only / zero-row handling
+   ├── discover success_part_*.csv from localDataPath
+   ├── bulk-load local CSV into an in-database staging table
+   ├── update tracking columns with request.syncTime + request.jobDetailsId
+   └── execute LoadMode-specific merge/insert/overwrite SQL
+
+3. Cleanup
+   └── Drop staging table
+```
+
+Use this pattern for SQL Server destination work, adapting only the SQL Server-specific parts.
+
+---
+
+## Staged Warehouse Reference Implementation Summary
 
 The Snowflake connector uses a three-phase approach:
 
@@ -997,12 +1078,11 @@ Key helper classes:
 ### Automated Checks
 
 ```bash
-# 1. Compile the project
-cd connectors/supaflow-connector-{name}
-mvn compile
+# 1. Compile from the platform root with reactor dependencies
+cd <platform-root>
+mvn -pl connectors/supaflow-connector-{name} -am compile
 
 # 2. Run verification script
-cd ../..
 bash <skill-root>/scripts/verify_connector.sh {name} <platform-root>
 ```
 
@@ -1010,9 +1090,14 @@ bash <skill-root>/scripts/verify_connector.sh {name} <platform-root>
 
 | Check | Expected Result |
 |-------|-----------------|
-| CHECK 3 | ✓ Required methods (stage, load, mapToTargetObject) |
-| CHECK 12 | ✓ Primary key identification in mapToTargetField |
-| All checks | All 15 should pass |
+| CHECK 16 | ✓ Destination capabilities configuration |
+| CHECK 17 | ✓ mapToTargetObject applies NamespaceRules and does not add tracking columns |
+| CHECK 18 | ✓ load() implementation uses request metadata/callback and local or staged data |
+| CHECK 19 | ✓ stage() implementation or direct-load no-op |
+| CHECK 20-23 | ✓ Direct database, staged warehouse/file, or activation-specific load checks |
+| CHECK 24 | ✓ Destination integration tests exist |
+| CHECK 27 | ✓ Cancellation support for long-running stage/load/DDL work |
+| Final state | All applicable source/shared and destination checks should pass |
 
 ### Manual Checklist
 
@@ -1073,6 +1158,8 @@ grep -n "getCapabilitiesConfig" src/main/java/**/*.java
 | **Ignoring namespace rules** | Wrong table/column names | Always use namespace rules for naming |
 | **Not handling LoadMode.MERGE** | Duplicates on every sync | Implement proper MERGE logic |
 | **Skipping DDL-only handling** | Schema propagation fails | Handle isDdlOnly() flag |
+| **Using fake stage locations for direct DB destinations** | load() takes the wrong path | Return `StageResponse.noOp(...)` when no stage exists |
+| **Generating sync_id in the connector** | Data lineage is detached from the job | Use `request.getJobDetailsId()` |
 | **Not cleaning up staging tables** | Orphaned tables accumulate | Drop staging tables after load |
 | **Hardcoding identifiers** | Reserved word conflicts | Use identifier formatter |
 | **Not setting DESTINATION capability** | Connector won't show as destination | Add to getConnectorCapabilities() |
@@ -1081,7 +1168,7 @@ grep -n "getCapabilitiesConfig" src/main/java/**/*.java
 
 ## Dual Source/Destination Connectors
 
-For connectors that can be both source and destination (like PostgreSQL):
+For connectors that can be both source and destination (like PostgreSQL or SQL Server):
 
 1. Implement ALL source methods (Phases 1-6)
 2. Implement ALL destination methods (Phase 7)
@@ -1120,7 +1207,7 @@ private String buildMergeSql(ObjectMetadata stageMetadata, ObjectMetadata target
 
     // Get primary key fields for join condition
     List<String> pkFields = stageMetadata.getFields().stream()
-        .filter(FieldMetadata::isPrimaryKey)
+        .filter(field -> Boolean.TRUE.equals(field.getPrimaryKey()))
         .map(FieldMetadata::getFormattedName)
         .collect(Collectors.toList());
 
@@ -1138,7 +1225,7 @@ private String buildMergeSql(ObjectMetadata stageMetadata, ObjectMetadata target
 
     // Build UPDATE SET clause (all non-PK fields)
     String updateClause = stageMetadata.getFields().stream()
-        .filter(f -> !f.isPrimaryKey())
+        .filter(f -> !Boolean.TRUE.equals(f.getPrimaryKey()))
         .map(f -> f.getFormattedName() + " = source." + f.getFormattedName())
         .collect(Collectors.joining(", "));
 
