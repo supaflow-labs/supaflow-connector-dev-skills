@@ -119,6 +119,7 @@ mvn clean install
 - Always run cursor identification (`identifyCursorFields()` or equivalent) and lock cursor fields.
 - Ensure capabilities declared in connector metadata match implemented methods.
 - Apply cancellation checks in every long-running loop, retry loop, and statement execution path.
+- Treat `MetadataSkipReason` as a backend/frontend wizard contract. Do not add or repurpose enum values from a connector without coordinated frontend classification, copy, generated type, selection, validation, and save-behavior updates.
 - Never default `trustServerCertificate=true` for production-facing connectors. Use `false` by default and require explicit opt-in for insecure/dev TLS behavior.
 - Source-only connectors MUST implement stub methods for `mapToTargetObject`, `stage`, and `load` that throw `UnsupportedOperationException`. The interface requires them even if the connector is source-only.
 - For destinations, implement required destination methods and identifier formatter methods expected by mapping/pipeline.
