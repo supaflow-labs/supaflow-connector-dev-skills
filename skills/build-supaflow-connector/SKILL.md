@@ -1,9 +1,6 @@
 ---
 name: build-supaflow-connector
 description: Build or review Supaflow connectors using a phased workflow for source connectors, warehouse destinations, and activation targets. Use this skill when implementing new connectors, debugging connector behavior, or validating connector quality in a Supaflow platform repository with gate checks and anti-pattern enforcement.
-disable-model-invocation: true
-argument-hint: <connector-name> <source|destination-warehouse|destination-activation>
-context: fork
 ---
 
 # Build Supaflow Connector
@@ -139,7 +136,7 @@ mvn clean install
 - Phase 0 completed (mandatory references read).
 - Phase 0 gate output shown before first code edit (and repeated after compaction).
 - Correct phase track completed for the connector mode.
-- Verification script passes all applicable checks (`1-15` for source, plus `16-24` for destinations).
+- Verification script passes all applicable checks (`1-15` for source, plus destination implementation, maturity, and packaging gates).
 - Verification script re-run after integration tests are written (not just at end of build).
 - Anti-pattern checks reviewed before final handoff.
 - If the task includes connector docs or marketing, `references/CONNECTOR_DOCS_MARKETING.md` was followed and a red-flag sweep was completed before final handoff.

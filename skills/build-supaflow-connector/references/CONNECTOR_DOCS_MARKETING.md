@@ -19,14 +19,16 @@ Before drafting or reviewing, inspect 2-3 clean existing connector docs and use 
 Good reference types:
 
 - one simple file-like source, such as `sftp.mdx`
-- one API source with broader object coverage, such as `hubspot.mdx`
-- one mature operational source, such as `postgres.mdx`
+- one API source, such as `github.mdx` (the cleanest current exemplar -- zero findings in the 2026-07-01 audit)
+- one database source, such as `mariadb.mdx` (canonical member of the What Gets Synced / Sync Modes / Schema Discovery family)
+
+Do not template off `hubspot.mdx`, `salesforce/index.mdx`, `salesforce-marketing-cloud.mdx`, or `postgres.mdx` -- each carries known drift from the current rules (destination-in-prerequisites, cursor-field column, missing sections, family-outlier structure). An existing doc that conflicts with these rules is technical debt, not a template.
 
 Use connector code and tests only to validate claims after the pattern is established.
 
-## Sources Index Is Required
+## Docs Index Is Required
 
-Every new docs page MUST be paired in the same commit with a matching entry in the human-curated landing page `supaflow-www/docs-src/docs/02-sources/index.md` (or `03-destinations/index.md` for destinations). The Docusaurus sidebar and the `/docs/sitemap.xml` auto-discover MDX files; the index landing page does not. A new connector that ships docs without an index entry is invisible to anyone browsing `/docs/sources` -- it ranks as an incomplete change.
+Every new docs page MUST be paired in the same commit with a matching entry in the role-specific human-curated landing page: `supaflow-www/docs-src/docs/02-sources/index.md` for sources, or `supaflow-www/docs-src/docs/03-destinations/index.md` for destinations. The Docusaurus sidebar and the `/docs/sitemap.xml` auto-discover MDX files; the index landing pages do not. A new connector that ships docs without a role-index entry is invisible to anyone browsing `/docs/sources` or `/docs/destinations` -- it ranks as an incomplete change.
 
 Use existing entries as the voice template:
 
@@ -37,15 +39,16 @@ Use existing entries as the voice template:
 {One-sentence summary in the same voice as the docs frontmatter description.}
 ```
 
-Match the docs frontmatter `description` in tone -- mechanism-forward, no marketing adjectives, end with a scope qualifier where honest (e.g., "Community connector built on dltHub.").
+Match the docs frontmatter `description` in tone -- mechanism-forward, no marketing adjectives, end with a scope qualifier where honest (e.g., "Community connector." or a concrete scope statement like "Syncs nine core billing objects."). Never name internal frameworks in the qualifier -- "built on dltHub" is a banned architecture leak.
 
-Pre-commit smoke test, run from `supaflow-www`:
+Pre-commit smoke test, run from `supaflow-www` with the path for the role you are shipping:
 
 ```
-grep -i '<slug>' docs-src/docs/02-sources/index.md
+grep -i '<slug>' docs-src/docs/02-sources/index.md        # source docs
+grep -i '<slug>' docs-src/docs/03-destinations/index.md   # destination docs
 ```
 
-Zero matches = the entry didn't land. Fix before committing.
+Zero matches in the relevant index = the entry didn't land. Fix before committing.
 
 ## Marketing Pages Are Templated
 
@@ -115,12 +118,16 @@ These should usually be findings in review:
 - copied vendor approval workflows for protected scopes or permissions-required access
 - markdown or formatting assumptions in plain-text marketing surfaces
 
+Exception: exact error strings the user will actually see -- whether emitted by the vendor or by Supaflow (Job Details / sync error messages) -- are fine and encouraged in Troubleshooting, even when they contain internal-sounding identifiers (e.g., "CT incremental read requires custom_state"). Quoted searchable error text is not a red flag; the same identifier in narrative prose is.
+
+Destination-page exception: user-visible `_supa_*` system columns may be documented in destination docs, including how users query or dedupe with them. Source docs should not expose `_supa_*` columns, and destination docs should still avoid internal computation mechanics such as hashing algorithms, staging filenames, and loader internals.
+
 ## Rate-Limit Pattern
 
 Prefer this pattern unless there is a strong reason not to:
 
 - The source applies API rate limits.
-- Supaflow handles transient rate limiting automatically.
+- Supaflow handles transient rate limiting automatically -- include this sentence ONLY when retry/backoff is verifiable in code Supaflow ships and on the connector's actual request path (explicit retry in connector code, or requests genuinely flowing through the dlt requests helper). Vendor-SDK-only retry does not qualify; a vendored source that calls the vendor SDK directly bypasses the dlt helper. If nothing qualifies, say the connector does not add a vendor-specific retry layer.
 - Large syncs may take longer or may need narrower scope or off-peak scheduling.
 - Link the official vendor rate-limit docs for current limits.
 
