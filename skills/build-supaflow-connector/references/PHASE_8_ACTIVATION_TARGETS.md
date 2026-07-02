@@ -69,7 +69,7 @@ grep -A 50 "upsertFromLocalFiles" \
   "$PLATFORM_ROOT"/connectors/supaflow-connector-"$REFERENCE_ACTIVATION_CONNECTOR"/src/main/java/**/*.java
 ```
 
-If no activation reference connector exists locally, keep this phase as the source of truth and enforce checks 16-24 plus activation metadata validation in tests.
+If no activation reference connector exists locally, keep this phase as the source of truth and enforce all destination checks plus activation metadata validation in tests.
 
 ### Confirm Understanding
 

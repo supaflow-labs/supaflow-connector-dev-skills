@@ -217,6 +217,30 @@ public ConnectorException checkForKnownExceptions(Throwable e) {
 }
 ```
 
+### 6. `isRetryableException(SQLException)` for JDBC Destinations (Required Review)
+
+`BaseJdbcConnector` retries broad SQLState classes for transient connection, transaction, and resource failures. That is useful for sources, but warehouse destinations often return the same broad class for terminal conditions that should not be retried.
+
+If the connector is a destination, review destination-specific errors and override `isRetryableException(SQLException)` when needed:
+
+```java
+@Override
+protected boolean isRetryableException(SQLException e) {
+    if (isWarehouseUsageLimit(e) || isStatementTimeout(e) || isUserCancellation(e)) {
+        return false;
+    }
+    return super.isRetryableException(e);
+}
+```
+
+Add unit tests for both sides:
+
+- A terminal destination error is not retryable.
+- A transient connection/serialization error remains retryable.
+- A concurrent cold-schema/table creation conflict remains retryable or is prevented with serialized/idempotent DDL.
+
+Do this before live smoke testing. A retry loop around a non-retryable warehouse error can hide the real root cause and waste capacity.
+
 ## POM Pattern for JDBC Connectors
 
 ```xml
@@ -241,6 +265,7 @@ Key POM requirements:
 - JDBC driver must be `scope=provided` (not bundled in shade JAR)
 - Shade plugin must exclude the JDBC driver: `<exclude>com.microsoft.sqlserver:*</exclude>`
 - `copy-provided-dependencies` execution must copy the driver to `jars/` subdirectory
+- Java connectors must include the local-agent deployment execution used by mature connectors (`exec-maven-plugin` with `deploy-local-connector`)
 - JDBC driver version should be managed in parent POM `<dependencyManagement>`
 
 See `supaflow-connector-postgres/pom.xml` for a complete working example.
@@ -321,6 +346,9 @@ Before proceeding to Phase 6 (integration testing), verify:
 - [ ] `checkForKnownExceptions()` covers auth, SSL, and connection errors
 - [ ] Source-only stubs (`mapToTargetObject`, `stage`, `load`) throw `UnsupportedOperationException`
 - [ ] POM has JDBC driver as `provided` scope with correct shade excludes
+- [ ] Destination connectors review/override `isRetryableException(SQLException)` and test terminal-error exclusions
+- [ ] Destination connectors cover concurrent first-load objects into a brand-new schema
+- [ ] POM includes `deploy-local-connector` so local agent runs pick up the built connector
 - [ ] Module registered in parent POM `<modules>`
 - [ ] Connector compiles: `mvn -pl connectors/supaflow-connector-<name> -DskipTests clean install`
 - [ ] Verification script passes: `bash "$SKILL_ROOT/scripts/verify_connector.sh" <name> "$PLATFORM_ROOT"`

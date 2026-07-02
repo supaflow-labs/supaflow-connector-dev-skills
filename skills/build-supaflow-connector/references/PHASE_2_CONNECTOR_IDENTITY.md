@@ -124,6 +124,8 @@ public String getIcon() {
 
 **Best Practice**: Copy the icon to `src/main/resources/icons/` so it's bundled with the JAR.
 
+**Release Gate**: `getIcon()` must return a real non-empty SVG payload. Do not leave the icon empty, placeholder-only, or dependent on a local development path. Missing icons can break connector deployment and leave the UI with unusable connector cards.
+
 ---
 
 ## Step 4: Define Connection Properties
@@ -186,6 +188,23 @@ public String subdomain;
 | `propertyGroup` | String | Group fields in UI |
 | `enumValues` | String[] | For PropertyType.ENUM |
 | `relatedPropertyNameAndValue` | String[] | Conditional visibility |
+
+### Product-Quality Property Surface
+
+Before considering Phase 2 complete, compare the property surface with the closest mature connector in the same category. For example, compare a new warehouse destination with Snowflake/Postgres and compare S3-backed staging fields with S3 Data Lake.
+
+Required review:
+
+- Labels use user-facing product language, not internal field names.
+- Descriptions explain why the field is needed and where to find the value.
+- Placeholders match the label and do not contain placeholder jargon.
+- Required, encrypted, password, and sensitive flags are correct for secrets.
+- Fields are grouped into user-facing sections such as `Connection`, `S3 Staging`, and `Advanced Settings`.
+- Advanced-only fields stay out of the primary connection section.
+- Source/read tuning controls are not exposed on write-only destinations unless the destination actually uses them.
+- Defaults match the common happy path and do not weaken security.
+
+Do not treat property annotations as a compile-only task. The connector card and setup form are part of the connector contract.
 
 ### Conditional Properties with relatedPropertyNameAndValue
 

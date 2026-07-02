@@ -574,6 +574,24 @@ For at least one incremental object, IT must validate:
 
 ---
 
+### Destination Connector Handoff Rule
+
+For connectors with `REPLICATION_DESTINATION`, source-style IT is not enough. Complete Phase 7's warehouse or activation destination test matrix before declaring the connector ready for broad source-to-destination smoke tests.
+
+For warehouse destinations, the minimum live IT evidence is:
+
+- All load modes: `APPEND`, `MERGE`, `OVERWRITE`, and `TRUNCATE_AND_LOAD`.
+- First-run table handling: `FAIL`, `DROP`, and `MERGE` where supported.
+- Callback row counts, `LoadResponse` counts, and error artifact contents.
+- Schema evolution DDL beyond column addition, including type changes.
+- All-type and binary round trips for the writer format used by the destination.
+- Stage file discovery using production `success_part_*` names.
+- Any destination physical-design preservation required by drop/recreate paths.
+
+Keep credentials in `export.env` and use `@EnabledIfEnvironmentVariable` or assumptions so CI without live credentials skips cleanly.
+
+---
+
 ## Step 2: Additional Test Cases (Recommended)
 
 ```java

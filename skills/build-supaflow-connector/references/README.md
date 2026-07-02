@@ -108,7 +108,7 @@ Build a {ConnectorName} connector following the phased skill approach:
 4. Build a connector-specific implementation prompt from your target API and connector mode (source, destination-warehouse, destination-activation).
 
 5. Final verification: bash <skill-root>/scripts/verify_connector.sh {name} {platform-root}
-   All checks must pass (15 source + 9 destination if applicable).
+   All checks must pass (15 source + destination checks including maturity and packaging gates if applicable).
 
 DO NOT proceed to next phase until current phase passes.
 Show gate verification output before moving on.
@@ -126,7 +126,7 @@ bash ./scripts/verify_connector.sh {connector-name}
 
 # Expected: All checks pass
 # - Source connectors: 15 checks
-# - Destination connectors: +9 additional checks (16-24)
+# - Destination connectors: additional checks 16-24 plus maturity/packaging gates
 ```
 
 ## Directory Structure
@@ -188,7 +188,7 @@ build-supaflow-connector/
 | 14 | Build artifacts not committed | 1 |
 | 15 | Integration tests exist | 6 |
 
-### Destination Connector Checks (16-24)
+### Destination Connector Checks (16-24.6)
 
 Auto-detected when connector has `REPLICATION_DESTINATION` or `REVERSE_ETL_DESTINATION` capability.
 
@@ -203,6 +203,8 @@ Auto-detected when connector has `REPLICATION_DESTINATION` or `REVERSE_ETL_DESTI
 | 22 | LoadMode handling (warehouse) OR merge_keys (activation) | 7, 8 |
 | 23 | DDL generation (warehouse) OR error/success processors (activation) | 7, 8 |
 | 24 | Destination integration tests | 7, 8 |
+| 24.5 | Warehouse live IT maturity matrix, row accounting, physical design, retry/logging anchors | 7 |
+| 24.6 | Local-agent deployment packaging (`deploy-local-connector`, provided dependency copy) | 1, 7 |
 
 **Note**: Destination connectors must also implement identifier formatting methods from Phase 4 (`getIdentifierFormatter`, `getIdentifierQuoteString`, `getIdentifierSeparator`, `getFullyQualifiedSchemaName`, `getFullyQualifiedTableName`). The pipeline uses them during mapping even for file-based destinations.
 
@@ -225,3 +227,8 @@ These are mandatory in addition to `verify_connector.sh`:
 4. **Integration test oracle quality**
    - Incremental IT validates lower/upper bounds and zero-record cursor advancement.
    - Record mapping IT validates schema-to-record field coverage, not just non-empty reads.
+
+5. **Warehouse destination maturity**
+   - Live IT proves all load modes, destination table handling, schema evolution, row counts, error artifacts, all-type/binary handling, and stage file discovery.
+   - Drop/recreate paths preserve destination-owned physical design where applicable.
+   - JDBC destinations review retry classification and log enough stage/query/statement context for smoke-test debugging.
