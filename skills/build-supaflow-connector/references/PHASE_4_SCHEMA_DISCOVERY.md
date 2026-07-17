@@ -19,6 +19,7 @@
 | `supaflow-core/.../model/metadata/ObjectMetadata.java` | Full ObjectMetadata class | Every field you can set |
 | `supaflow-core/.../model/metadata/FieldMetadata.java` | Full FieldMetadata class | **CRITICAL: originalDataType, canonicalType** |
 | `supaflow-core/.../enums/CanonicalType.java` | Available type enum | Valid type mappings |
+| `supaflow-core/.../enums/MetadataSkipReason.java` | Skip reason contract | Wizard behavior depends on these values |
 | `supaflow-connector-sdk/.../model/SchemaRequest.java` | Schema request inputs | Filtering/level controls |
 | `supaflow-connector-sdk/.../model/SchemaResponse.java` | Schema response wrapper | How to return objects |
 | `supaflow-connector-sdk/.../schema/SchemaGenerator.java` | Inference pipeline facade | Sample + infer + map workflow |
@@ -37,6 +38,7 @@ REFERENCE_SOURCE_CONNECTOR="${REFERENCE_SOURCE_CONNECTOR:-hubspot}"
 find "$PLATFORM_ROOT" -name "ObjectMetadata.java" -path "*/supaflow-core/*" -exec cat {} \;
 find "$PLATFORM_ROOT" -name "FieldMetadata.java" -path "*/supaflow-core/*" -exec cat {} \;
 find "$PLATFORM_ROOT" -name "CanonicalType.java" -path "*/supaflow-core/*" -exec cat {} \;
+find "$PLATFORM_ROOT" -name "MetadataSkipReason.java" -path "*/supaflow-core/*" -exec cat {} \;
 find "$PLATFORM_ROOT" -name "SchemaRequest.java" -path "*/supaflow-connector-sdk/*" -exec cat {} \;
 find "$PLATFORM_ROOT" -name "SchemaResponse.java" -path "*/supaflow-connector-sdk/*" -exec cat {} \;
 find "$PLATFORM_ROOT" -name "SchemaGenerator.java" -path "*/supaflow-connector-sdk/*" -exec cat {} \;
@@ -66,6 +68,7 @@ Before proceeding, you MUST be able to answer:
 7. What is `setCursorFieldLocked(true)` for?
 8. When should you use `SchemaGenerator` instead of manual per-field type mapping?
 9. What diagnostics are available in `SchemaInferenceResult` and how can they drive type-correction logs?
+10. Which `MetadataSkipReason` values are permanent in the wizard, and what does `UNSUPPORTED_TYPE` do to object/field selection?
 
 ---
 
@@ -217,6 +220,38 @@ Every discovered field must set:
 
 Recommended field value:
 - `originalName` when the source/API field name differs from the normalized Supaflow field name
+
+### Skipped Objects, Unsupported Types, and Wizard Contract
+
+`MetadataSkipReason` is a backend-to-frontend contract, not a connector-local label. The pipeline wizard classifies skip reasons as permanent or fixable; permanent reasons are filtered out of bulk selection, blocked on individual selection, omitted from selected-object error counts, and blocked again at save if somehow selected. Do not add, rename, or repurpose enum values from a connector without a coordinated backend type-export and frontend wizard update.
+
+Use `MetadataSkipReason.UNSUPPORTED_TYPE` only for objects or fields that are permanently not selectable from the user's perspective:
+- a source field type cannot be mapped or read safely
+- a source entity exists in metadata but cannot be queried directly by design
+- the connector deliberately blocks a known operationally unsafe object
+
+Do not use `UNSUPPORTED_TYPE` for issues the user, tenant admin, or pipeline configuration can plausibly fix, such as missing cursor, missing primary key, RBP/permission failures, target-population restrictions, transient API errors, rate limits, or tenant-specific data absence. If an API exposes objects in metadata but later returns permission errors, keep that as a permission/read failure unless the connector has a product decision to make the object permanently unavailable for every user.
+
+When skipping an object at discovery time, keep the object visible but unselectable:
+
+```java
+if (isPermanentlyUnsupported(objectName)) {
+    object.setSkipped(true);
+    object.setSkippedReason(MetadataSkipReason.UNSUPPORTED_TYPE);
+    object.setSelected(false);
+}
+```
+
+Keep separate matcher methods for distinct causes even when they share `UNSUPPORTED_TYPE` in the public contract. For example, use `isUnsupportedDirectReadEntity(...)` separately from `isOperationallyUnsafeEntity(...)`, and cover both with tests. This preserves internal clarity without expanding the frontend skip-reason contract.
+
+If you think a new skip reason is needed, stop and inspect the frontend first:
+- `supaflow-app/src/utils/errorDetection.ts` (`PERMANENT_SKIP_REASONS`, `FIXABLE_SKIP_REASONS`)
+- `supaflow-app/src/components/pipeline/schema/SchemaSelector.tsx` (selection blocking)
+- `supaflow-app/src/components/pipeline/SchemaTree.tsx` (display/tooltips)
+- `supaflow-app/src/lib/schemaSaveHelpers.ts` (save blocking)
+- generated `supaflow-app/src/types/backend/backendTypes.ts`
+
+Adding a new enum value requires deciding whether it is permanent or fixable, updating wizard behavior and copy, regenerating backend types, and adding frontend tests for selection, validation, and save behavior.
 
 ### Why originalDataType is CRITICAL
 
@@ -799,6 +834,8 @@ Before proceeding to Phase 5, confirm ALL of the following:
 | ☐ Every ObjectMetadata has `identityStrategy` set to `SOURCE_KEY` or `ROW_HASH` | Code review |
 | ☐ Normal source objects set `objectType` to `ObjectType.PRIMARY` unless they are association/history/metadata objects | Code review |
 | ☐ Every ObjectMetadata has at least one field | Code review |
+| ☐ Permanently unsupported objects/fields use an existing `MetadataSkipReason`; new enum values were not added without frontend wizard analysis | Code review |
+| ☐ Objects/fields marked `UNSUPPORTED_TYPE` are genuinely permanent/non-fixable, not permissions or transient source errors | Code review |
 | ☐ Every FieldMetadata has `name` set | Code review |
 | ☐ **CRITICAL**: Every FieldMetadata has `originalDataType` set | `grep -c "setOriginalDataType"` |
 | ☐ Every FieldMetadata has `canonicalType` set | Code review |
@@ -843,11 +880,14 @@ Before proceeding to Phase 5, show:
 | Mistake | Why It's Wrong | Correct Approach |
 |---------|----------------|------------------|
 | **Not setting originalDataType** | Schema incomplete, breaks tracking | ALWAYS set for every field |
+| Not marking any field as PK | Deduplication fails | Every object needs at least one PK |
 | Setting `sourcePrimaryKey(false)` or `sourceCursorField(false)` | Sparse source flags must be true or unset | Only call source flag setters when the value is true |
 | Missing `primaryKeyCapable` or `cursorCapable` | Metadata compliance fails | Set capability booleans for every field |
 | Missing `type`, `incrementalStrategy`, or `identityStrategy` on ObjectMetadata | Metadata compliance fails | Set all required object metadata fields |
 | Using `IncrementalStrategy.NONE` | Legacy value rejected by compliance checks | Use `UNSUPPORTED` when incremental sync is unavailable |
 | Inventing a PK when the source has none | Deduplication can become unstable | Prefer source-declared keys; otherwise use `IdentityStrategy.ROW_HASH` |
+| Adding a `MetadataSkipReason` enum value from a connector | Wizard classification/copy/save behavior may break | Reuse existing reasons or coordinate backend type export + frontend wizard changes |
+| Marking permission/RBP failures as `UNSUPPORTED_TYPE` | User-fixable access issues become permanently unselectable | Keep as permission/read failure unless product decides the object is globally unsupported |
 | identifyCursorFields() defined but not called | Incremental sync won't work | Must call in schema(request) for each object |
 | Not calling setCursorFieldLocked(true) | System doesn't know cursor is set | Always call after identifying cursors |
 | Using wrong CanonicalType | Type conversion errors | Match source type semantics |
