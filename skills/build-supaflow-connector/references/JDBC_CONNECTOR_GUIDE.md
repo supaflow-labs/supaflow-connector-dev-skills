@@ -2,14 +2,14 @@
 
 This guide replaces Phases 3-5 for JDBC-based connectors that extend `BaseJdbcConnector`. Use this instead of `PHASE_3_CONNECTION_AUTH.md`, `PHASE_4_SCHEMA_DISCOVERY.md`, and `PHASE_5_READ_OPERATIONS.md`.
 
-Still complete Phase 1 (project setup), Phase 2 (identity/properties), and Phase 6 (integration testing) using their standard docs.
+Still complete Phase 1 (project setup), Phase 2 (identity/properties), and Phase 6 (integration testing) using their standard docs. If the JDBC connector is also a destination, complete Phase 7 after this guide.
 
 ## Essential Reading
 
 Before implementing, read these source files in the platform repo:
 
 - `connectors/supaflow-connector-jdbc-common/.../BaseJdbcConnector.java` -- base class (large file, focus on abstract methods and overridable hooks)
-- `connectors/supaflow-connector-postgres/.../PostgresConnector.java` -- reference for source+destination JDBC connector
+- `connectors/supaflow-connector-postgres/.../PostgresConnector.java` -- reference for source+destination JDBC connector, including direct destination loading
 - `connectors/supaflow-connector-generic-jdbc/.../GenericConnector.java` -- reference for source-only JDBC connector
 
 ## What the Base Class Handles (Do NOT Reimplement)
@@ -27,7 +27,7 @@ BaseJdbcConnector provides complete implementations for:
 | `close()` | Shuts down DataSource and connection pool |
 | Primary key detection | From JDBC database metadata constraints |
 
-## What You MUST Implement
+## What You MUST Implement For Every JDBC Connector
 
 ### 1. `validateAndSetConnectorProperties()` (Abstract -- Required)
 
@@ -69,9 +69,13 @@ protected DatasourceConfig validateAndSetConnectorProperties(
 }
 ```
 
-### 2. Source-Only Stub Methods (Required by Interface)
+### 2. Destination Methods: Choose Source-Only Stubs or Real Destination Implementations
 
-Even if the connector is source-only, the `SupaflowConnector` interface requires these methods. They MUST exist or the class will not compile.
+The `SupaflowConnector` interface requires `mapToTargetObject`, `stage`, and `load` for every connector class. What these methods do depends on the connector's declared capabilities.
+
+#### Source-Only JDBC Connectors
+
+If `getConnectorCapabilities()` returns only `REPLICATION_SOURCE`, implement source-only stubs. Throw `UnsupportedOperationException` or `ConnectorException` with `UNSUPPORTED_OPERATION`.
 
 ```java
 @Override
@@ -92,7 +96,28 @@ public LoadResponse load(LoadRequest request) throws ConnectorException {
 }
 ```
 
-## What You MUST Override
+#### JDBC Source + Destination Connectors
+
+If the connector should also be a destination, do not use the stubs above. Add `REPLICATION_DESTINATION` and implement Phase 7 using `PostgresConnector` as the reference pattern:
+
+- `stage()` returns `StageResponse.noOp(...)` because direct database destinations load from `LoadRequest.getLocalDataPath()`.
+- `load()` handles `request.isDdlOnly()` and `request.isZeroRows()` before requiring `localDataPath`.
+- `load()` discovers `success_part_*.csv` files from `request.getLocalDataPath()` and ignores error files.
+- `load()` creates an in-database staging table, bulk-loads local CSV data, updates tracking columns with `request.getSyncTime()` and `request.getJobDetailsId()`, then executes the requested load mode.
+- Keep `executeSqlScript()` inherited from `BaseJdbcConnector` unless the database needs connector-specific script behavior.
+
+For SQL Server destination support, model the implementation on Postgres but adapt the dialect: SQL Server identifiers, native type mapping, bulk-load API, staging-table DDL, `MERGE` syntax, and schema-evolution SQL.
+
+### JDBC Identifier Formatting Notes
+
+`BaseJdbcConnector` already provides `getIdentifierFormatter()`, `getFullyQualifiedSchemaName(...)`, and `getFullyQualifiedTableName(...)` using the connector's quote string, separator, catalog/schema support, and case-sensitivity settings. For JDBC destinations, read those inherited methods before adding Phase 7 mapping code.
+
+Connector-specific destination code should:
+- Reuse inherited FQN/formatter methods instead of hand-concatenating catalog/schema/table names.
+- Override or configure only database-specific pieces such as quote string (`"` vs `[]`), separator, catalog/schema support, and identifier case sensitivity.
+- Follow `PostgresConnector.mapToTargetObject(...)` as the direct database reference, then swap in the connector's own data type mapper and dialect helpers.
+
+## What You MUST Override For Source Correctness
 
 ### 3. `mapTypeByName()` (Override -- Required for Correctness)
 
@@ -279,10 +304,11 @@ JDBC connectors typically use Docker containers for integration testing instead 
 ```bash
 # Start database container
 docker run -d --name sqlserver-test \
+  --platform linux/amd64 \
   -e "ACCEPT_EULA=Y" \
   -e "MSSQL_SA_PASSWORD=YourStr0ngP@ss" \
   -p 1433:1433 \
-  mcr.microsoft.com/mssql/mssql-server:2022-latest
+  mcr.microsoft.com/mssql/server:2022-latest
 
 # Wait for startup
 sleep 15
@@ -295,10 +321,12 @@ docker exec sqlserver-test /opt/mssql-tools18/bin/sqlcmd \
 
 ### Common Pitfalls
 
-- **ARM emulation (Apple Silicon)**: Some database features are unavailable under ARM emulation (e.g., SQL Server Full-Text Search). Design test data to avoid these features.
+- **SQL Server image name**: Use `mcr.microsoft.com/mssql/server:2022-latest`, not the stale `mcr.microsoft.com/mssql/mssql-server` path.
+- **ARM emulation (Apple Silicon)**: SQL Server images are amd64-only; use `--platform linux/amd64` on arm64 machines. Some database features are unavailable under emulation (e.g., SQL Server Full-Text Search). Design test data to avoid these features.
 - **Password escaping**: Use passwords without shell-special characters (`!`, `$`, `` ` ``) to avoid escaping issues in Docker commands and sqlcmd.
 - **Container persistence**: Docker containers lose data on restart. Create test data in the same script that starts the container, or use volume mounts.
 - **Startup time**: Databases need 10-30 seconds to initialize. Add a wait/retry loop before running tests.
+- **Driver-native bulk APIs**: Pooled connections may be Hikari proxy objects. Before passing a connection to driver-native bulk loaders such as `SQLServerBulkCopy`, unwrap it to the vendor connection class with `connection.unwrap(...)`.
 
 ### IT Test Environment Variables
 
@@ -331,9 +359,33 @@ public ConnectorCapabilitiesConfig getCapabilitiesConfig() {
 }
 ```
 
-### Source + Destination (Warehouse)
+### Source + Destination (Direct Database)
 
-See `PostgresConnector` for the full destination pattern including `REPLICATION_DESTINATION` capability, load modes, table handling, and schema evolution support.
+```java
+@Override
+public Set<ConnectorCapabilities> getConnectorCapabilities() {
+    return EnumSet.of(
+        ConnectorCapabilities.REPLICATION_SOURCE,
+        ConnectorCapabilities.REPLICATION_DESTINATION
+    );
+}
+
+@Override
+public ConnectorCapabilitiesConfig getCapabilitiesConfig() {
+    return ConnectorCapabilitiesConfigBuilder.builder()
+        .asTraditionalDatabase()
+        .requiresStaging(false)
+        .requiresExplicitLoadStep(true)
+        .canAutoCreateSchema(true)
+        .supportsHardDeletes(true)
+        // Include the null marker only if the load implementation supports it.
+        // Postgres uses "\\N"; SQL Server should use the marker its loader handles.
+        .supportedNullIf(List.of("\\N"))
+        .build();
+}
+```
+
+See `PostgresConnector` for the full direct database destination pattern including `REPLICATION_DESTINATION`, no-op staging, local CSV loading, load modes, table handling, and schema evolution support.
 
 ## Checklist
 
@@ -344,11 +396,14 @@ Before proceeding to Phase 6 (integration testing), verify:
 - [ ] `mapTypeByName()` covers all database-specific type names
 - [ ] `convertToCanonicalValue()` handles all proprietary JDBC driver Java types
 - [ ] `checkForKnownExceptions()` covers auth, SSL, and connection errors
-- [ ] Source-only stubs (`mapToTargetObject`, `stage`, `load`) throw `UnsupportedOperationException`
+- [ ] If source-only: stubs (`mapToTargetObject`, `stage`, `load`) throw `UnsupportedOperationException` or `UNSUPPORTED_OPERATION`
+- [ ] If source+destination: `getConnectorCapabilities()` includes `REPLICATION_DESTINATION`
+- [ ] If source+destination: `stage()` returns `StageResponse.noOp(...)`, not a fake stage location
+- [ ] If source+destination: `load()` reads `LoadRequest.getLocalDataPath()`, handles DDL-only/zero-rows, and uses `request.getSyncTime()` plus `request.getJobDetailsId()`
 - [ ] POM has JDBC driver as `provided` scope with correct shade excludes
 - [ ] Destination connectors review/override `isRetryableException(SQLException)` and test terminal-error exclusions
 - [ ] Destination connectors cover concurrent first-load objects into a brand-new schema
 - [ ] POM includes `deploy-local-connector` so local agent runs pick up the built connector
 - [ ] Module registered in parent POM `<modules>`
-- [ ] Connector compiles: `mvn -pl connectors/supaflow-connector-<name> -DskipTests clean install`
+- [ ] Connector compiles from the platform root: `mvn -pl connectors/supaflow-connector-<name> -am -DskipTests clean install`
 - [ ] Verification script passes: `bash "$SKILL_ROOT/scripts/verify_connector.sh" <name> "$PLATFORM_ROOT"`

@@ -1,6 +1,8 @@
 ---
 name: build-supaflow-connector
-description: Build or review Supaflow connectors using a phased workflow for source connectors, warehouse destinations, and activation targets. Use this skill when implementing new connectors, debugging connector behavior, or validating connector quality in a Supaflow platform repository with gate checks and anti-pattern enforcement.
+description: Build or review Supaflow connectors using a phased workflow for source connectors, structured destinations, and activation targets. Use this skill when implementing new connectors, debugging connector behavior, or validating connector quality in a Supaflow platform repository with gate checks and anti-pattern enforcement.
+argument-hint: <connector-name> <source|destination-database|destination-warehouse|destination-activation|hybrid>
+context: fork
 ---
 
 # Build Supaflow Connector
@@ -11,7 +13,7 @@ Build connectors phase-by-phase, enforce verification gates before moving forwar
 
 - `platform_root`: absolute path to a Supaflow platform repo clone containing `pom.xml` and `connectors/`
 - `connector_name`: directory/module suffix (for example, `airtable`)
-- `connector_mode`: `source`, `destination-warehouse`, `destination-activation`, or `hybrid`
+- `connector_mode`: `source`, `destination-database`, `destination-warehouse`, `destination-activation`, or `hybrid`
 - `connector_base`: `jdbc` if JDBC-based (extends BaseJdbcConnector), otherwise `api` (default)
 - `auth_type`: API key, OAuth client credentials, OAuth auth code, or custom
 - `api_surface`: object endpoints, pagination model, rate limits, and date/cursor fields
@@ -52,6 +54,7 @@ If your session context was compacted or you lost prior instructions, re-read th
 If the connector is JDBC-based (`connector_base: jdbc`), follow the **JDBC track**:
 - Phases 1, 2: same as API track
 - Phases 3, 4, 5: replaced by `references/JDBC_CONNECTOR_GUIDE.md`
+- Phase 7: add only if the JDBC connector is also a structured destination (for example PostgreSQL or SQL Server)
 - Phase 6: same as API track (integration testing)
 
 If the connector is API-based (REST, SOAP, GraphQL), follow the standard phase track below.
@@ -59,9 +62,10 @@ If the connector is API-based (REST, SOAP, GraphQL), follow the standard phase t
 ## Choose Track
 
 - `source`: complete phases `1 -> 6` (or `1, 2, JDBC guide, 6` for JDBC connectors)
+- `destination-database`: complete phases `1 -> 4`, then `7`, then destination tests/checks (or `1, 2, JDBC guide, 7, 6` for JDBC connectors)
 - `destination-warehouse`: complete phases `1 -> 4`, then `7`, then destination tests/checks
 - `destination-activation`: complete phases `1 -> 4`, then `8`, then destination tests/checks
-- `hybrid`: execute both destination tracks (`7` and `8`) only if the connector truly supports both patterns
+- `hybrid`: combine the source track with the applicable destination track. Use Phase 7 for structured database/warehouse/file destinations and Phase 8 only for activation/API destinations.
 
 ## Load Phase Docs by Need
 
@@ -81,8 +85,8 @@ Load only the current phase doc. For JDBC connectors, load `references/JDBC_CONN
 
 1. Read the phase doc prerequisites and required core classes.
 2. Implement only the current phase scope.
-3. Run phase gate checks and show command output.
-4. Fix all failures.
+3. Run the phase gate checks and show command output.
+4. Fix failures for the current phase's listed checks. The verifier is also a final-state gate, so failures from later phases are expected until those phases are implemented.
 5. Proceed to the next phase only after the current phase is clean.
 
 ## Required Commands
@@ -95,9 +99,10 @@ SKILL_ROOT="<abs-path-to-this-skill-folder>"
 
 # Build connector module quickly during iteration
 cd "$PLATFORM_ROOT"
-mvn -pl connectors/supaflow-connector-<connector_name> -DskipTests clean install
+mvn -pl connectors/supaflow-connector-<connector_name> -am -DskipTests clean install
 
-# Gate verification (must pass before moving phases)
+# Gate verification. During phased work, use the phase docs' listed checks as the
+# gate; at final handoff, all applicable verifier checks must pass.
 bash "$SKILL_ROOT/scripts/verify_connector.sh" <connector_name> "$PLATFORM_ROOT"
 ```
 
@@ -118,7 +123,7 @@ mvn clean install
 - Apply cancellation checks in every long-running loop, retry loop, and statement execution path.
 - Treat `MetadataSkipReason` as a backend/frontend wizard contract. Do not add or repurpose enum values from a connector without coordinated frontend classification, copy, generated type, selection, validation, and save-behavior updates.
 - Never default `trustServerCertificate=true` for production-facing connectors. Use `false` by default and require explicit opt-in for insecure/dev TLS behavior.
-- Source-only connectors MUST implement stub methods for `mapToTargetObject`, `stage`, and `load` that throw `UnsupportedOperationException`. The interface requires them even if the connector is source-only.
+- Source-only connectors MUST implement stub methods for `mapToTargetObject`, `stage`, and `load` that throw `UnsupportedOperationException` or `ConnectorException` with `UNSUPPORTED_OPERATION`. The interface requires them even if the connector is source-only.
 - For destinations, implement required destination methods and identifier formatter methods expected by mapping/pipeline.
 - JDBC connectors MUST override `convertToCanonicalValue()` to handle database-specific Java types returned by the JDBC driver. Without this, proprietary types (e.g., `microsoft.sql.DateTimeOffset`, `org.postgresql.util.PGobject`) cause ClassCastException at runtime.
 - Keep integration tests meaningful: incremental windows, cursor advancement, and schema-to-record field coverage.
@@ -136,7 +141,7 @@ mvn clean install
 - Phase 0 completed (mandatory references read).
 - Phase 0 gate output shown before first code edit (and repeated after compaction).
 - Correct phase track completed for the connector mode.
-- Verification script passes all applicable checks (`1-15` for source, plus destination implementation, maturity, and packaging gates).
+- Verification script passes all applicable final-state checks (`1-15`, `25-27`, and source/destination-specific checks; destinations also run `16-24` plus maturity and packaging gates).
 - Verification script re-run after integration tests are written (not just at end of build).
 - Anti-pattern checks reviewed before final handoff.
 - If the task includes connector docs or marketing, `references/CONNECTOR_DOCS_MARKETING.md` was followed and a red-flag sweep was completed before final handoff.

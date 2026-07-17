@@ -4,7 +4,7 @@
 
 **Time Estimate**: 60-90 minutes
 
-**Prerequisite**: Phase 5 completed and all 15 verification checks pass.
+**Prerequisite**: Phase 5 completed and all applicable source/shared verification checks pass.
 
 ---
 
@@ -41,7 +41,7 @@ source export.env
 ## Step 1: Create IT Test Class Structure
 
 ```java
-package io.supaflow.connectors.{name};
+package io.supaflow.connector.{name};
 
 import io.supaflow.connector.sdk.model.ReadRequest;
 import io.supaflow.connector.sdk.model.ReadResponse;
@@ -229,13 +229,13 @@ public class {Name}ConnectorIT {
                     .as("Original data type required for " + obj.getName() + "." + field.getName())
                     .isNotNull();
 
-                if (field.isPrimaryKey()) {
+                if (Boolean.TRUE.equals(field.getSourcePrimaryKey())) {
                     hasPrimaryKey = true;
                 }
             }
 
             assertThat(hasPrimaryKey)
-                .as("Object should have primary key: " + obj.getName())
+                .as("Object should have source primary key: " + obj.getName())
                 .isTrue();
         }
     }
@@ -699,20 +699,20 @@ private ObjectMetadata findLargeObject(List<ObjectMetadata> objects) {
 ## Step 3: Run Integration Tests
 
 ```bash
-# Navigate to connector directory
-cd connectors/supaflow-connector-{name}
+# Run from the platform root so reactor dependencies are available
+cd <platform-root>
 
-# Load credentials
+# Load credentials if your repo/task provides an env file
 source export.env
 
 # Run all IT tests
-mvn test -Dtest={Name}ConnectorIT
+mvn -pl connectors/supaflow-connector-{name} -am test -Dtest={Name}ConnectorIT
 
 # Run specific test
-mvn test -Dtest={Name}ConnectorIT#testConnectionSuccess
+mvn -pl connectors/supaflow-connector-{name} -am test -Dtest={Name}ConnectorIT#testConnectionSuccess
 
 # Run with verbose output
-mvn test -Dtest={Name}ConnectorIT -X
+mvn -pl connectors/supaflow-connector-{name} -am test -Dtest={Name}ConnectorIT -X
 ```
 
 ---
