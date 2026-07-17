@@ -59,12 +59,12 @@ If no suitable reference connector exists in your repo, use this phase document 
 
 Before proceeding, you MUST be able to answer:
 
-1. What fields does ObjectMetadata have? (name, displayName, fields, category, customAttributes, etc.)
-2. What fields does FieldMetadata have? (name, canonicalType, originalDataType, isPrimaryKey, isCursorField, etc.)
+1. What fields does ObjectMetadata have? (name, fullyQualifiedName, type, objectType, fields, description, customAttributes, incrementalStrategy, identityStrategy, etc.)
+2. What fields does FieldMetadata have? (name, label, canonicalType, originalDataType, sourcePrimaryKey, sourceCursorField, capabilities, nillable, precision/scale, etc.)
 3. **CRITICAL**: What is `originalDataType` and why must it ALWAYS be set?
 4. What CanonicalTypes are available? (STRING, LONG, DOUBLE, BOOLEAN, INSTANT, LOCALDATE, JSON, etc.)
-5. How do you mark a field as primary key?
-6. How do you mark a field as cursor field?
+5. How do you mark a connector-discovered source primary key?
+6. How do you mark a connector-discovered source cursor field?
 7. What is `setCursorFieldLocked(true)` for?
 8. When should you use `SchemaGenerator` instead of manual per-field type mapping?
 9. What diagnostics are available in `SchemaInferenceResult` and how can they drive type-correction logs?
@@ -99,6 +99,8 @@ Use Oracle TM as the reference implementation for:
 - sample-first inference
 - metadata reconciliation/corrections
 - diagnostics-aware logging
+
+For metadata-driven sources (OData `$metadata`, OpenAPI schemas, JDBC catalogs, etc.), build `ObjectMetadata` directly from the declared schema and skip `SchemaGenerator`; do not infer types from samples when the source publishes authoritative metadata.
 
 ---
 
@@ -136,16 +138,16 @@ ObjectMetadata object = new ObjectMetadata();
 
 // Required fields
 object.setName("journey");                    // API/internal name (lowercase, underscore)
-object.setDisplayName("Journey");             // Human-readable name
+object.setFullyQualifiedName("journey");      // Stable source object identifier
+object.setType("TABLE");                      // Required; source_metadata_catalog.object_type is NOT NULL
 object.setFields(fieldList);                  // List<FieldMetadata>
+object.setIncrementalStrategy(IncrementalStrategy.COLUMN_CURSOR); // or UNSUPPORTED / CONNECTOR_MANAGED
+object.setIdentityStrategy(IdentityStrategy.SOURCE_KEY);          // or ROW_HASH when no stable source key exists
 
 // Optional but recommended
-object.setCategory("Interactions");           // Grouping in UI
+object.setObjectType(ObjectType.PRIMARY);      // PRIMARY, ASSOCIATION, HISTORY, METADATA
 object.setDescription("Marketing journeys");  // Help text
-
-// Sync capabilities
-object.setIncrementalSyncSupported(true);     // Can this object sync incrementally?
-object.setCursorFieldLocked(true);            // Cursor field has been identified
+object.setCursorFieldLocked(true);            // Cursor field identification has been completed
 
 // Custom attributes (for storing metadata needed during read)
 object.putCustomAttribute("api_endpoint", "/interaction/v1/interactions");
@@ -170,28 +172,54 @@ field.setCanonicalType(CanonicalType.INSTANT); // Target type for destination
 field.setOriginalDataType("DateTime");         // CRITICAL: Source system's type name
 
 // ================================================================
-// PRIMARY KEY - Set for at least one field per object
+// SOURCE PRIMARY KEY - Connector-discovered default business key
 // ================================================================
 
-field.setPrimaryKey(true);                     // Is this the primary key?
+field.setSourcePrimaryKey(true);               // Source exposes this as a stable business key
+field.setPrimaryKeyCapable(true);              // This field can be selected as a primary key
 
 // ================================================================
-// CURSOR FIELD - For incremental sync
+// SOURCE CURSOR FIELD - For incremental sync
 // ================================================================
 
-field.setCursorField(true);                    // Can this field be used as cursor?
 field.setSourceCursorField(true);              // Source supports filtering on this
+field.setCursorCapable(true);                  // This field can be selected as a cursor
 field.setFilterable(true);                     // Can filter API by this field
 
 // ================================================================
 // OPTIONAL FIELDS
 // ================================================================
 
-field.setDisplayName("Modified Date");         // Human-readable name
+field.setLabel("Modified Date");               // Human-readable label
+field.setOriginalName("modifiedDate");         // Source/API field name when different from normalized name
 field.setDescription("Last modification time"); // Help text
-field.setNullable(true);                       // Can be null?
-field.setSourcePath("modifiedDate");           // JSON path in API response
+field.setNillable(true);                       // Can be null?
 ```
+
+### Required ObjectMetadata and FieldMetadata Checklist
+
+Every discovered object must set:
+- `name`
+- `fullyQualifiedName`
+- `type` (usually `"TABLE"`)
+- `fields`
+- `incrementalStrategy` (`COLUMN_CURSOR`, `CONNECTOR_MANAGED`, or `UNSUPPORTED`; do not use legacy `NONE`)
+- `identityStrategy` (`SOURCE_KEY` when the source declares a key, otherwise `ROW_HASH` when row identity is derived)
+
+Recommended object field:
+- `objectType` (`ObjectType.PRIMARY` for normal source objects)
+
+Every discovered field must set:
+- `name`
+- `canonicalType`
+- `originalDataType`
+- `primaryKeyCapable`
+- `cursorCapable`
+- For `BIGDECIMAL`, set precision in `1..38` and scale in `0..min(37, precision)`
+- Source flags are sparse booleans: set `sourcePrimaryKey` / `sourceCursorField` only for true defaults; leave them unset instead of setting `false`
+
+Recommended field value:
+- `originalName` when the source/API field name differs from the normalized Supaflow field name
 
 ### Skipped Objects, Unsupported Types, and Wizard Contract
 
@@ -294,17 +322,18 @@ public enum CanonicalType {
 Create a helper to ensure all required fields are set:
 
 ```java
+import io.supaflow.core.model.metadata.FieldCapabilityUtil;
+
 /**
  * Helper to create FieldMetadata with all required fields.
  * Ensures originalDataType is ALWAYS set.
  */
 private FieldMetadata createField(
         String name,
-        String displayName,
+        String label,
         CanonicalType canonicalType,
         String originalDataType,  // REQUIRED - source system type
-        boolean isPrimaryKey,
-        String sourcePath) {
+        boolean isSourcePrimaryKey) {
 
     FieldMetadata field = new FieldMetadata();
 
@@ -314,10 +343,17 @@ private FieldMetadata createField(
     field.setOriginalDataType(originalDataType);  // CRITICAL - MUST set
 
     // Optional but recommended
-    field.setDisplayName(displayName != null ? displayName : name);
-    field.setSourcePath(sourcePath != null ? sourcePath : name);
-    field.setPrimaryKey(isPrimaryKey);
-    field.setNullable(!isPrimaryKey);  // PKs are not nullable
+    field.setLabel(label != null ? label : name);
+    if (isSourcePrimaryKey) {
+        field.setSourcePrimaryKey(true);
+    }
+    field.setPrimaryKeyCapable(FieldCapabilityUtil.isPrimaryKeyCapable(canonicalType));
+    field.setCursorCapable(FieldCapabilityUtil.isCursorCapable(canonicalType));
+    field.setNillable(!isSourcePrimaryKey);  // PKs are not nullable
+    if (canonicalType == CanonicalType.BIGDECIMAL) {
+        field.setPrecision(38);
+        field.setScale(18);
+    }
 
     return field;
 }
@@ -326,26 +362,26 @@ private FieldMetadata createField(
 private FieldMetadata createField(
         String name,
         CanonicalType canonicalType,
-        String originalDataType,
-        String sourcePath) {
-    return createField(name, null, canonicalType, originalDataType, false, sourcePath);
+        String originalDataType) {
+    return createField(name, null, canonicalType, originalDataType, false);
 }
 ```
 
 ---
 
-## Step 2: Implement Primary Key Identification
+## Step 2: Implement Source Key and Identity Identification
 
-Every object MUST have at least one primary key field:
+Every object MUST declare an `identityStrategy`. Mark `sourcePrimaryKey` fields only when the source exposes a stable key. If the source does not expose a stable key, use `IdentityStrategy.ROW_HASH` instead of inventing a fragile primary key.
 
 ```java
 /**
- * Identify and mark primary key fields.
+ * Identify and mark source primary key fields, then set object identity strategy.
  *
  * Strategy:
- * 1. Look for field named "id", "key", or ending with "_id"
- * 2. Look for field marked as PK in source schema
- * 3. If no obvious PK, use first field as PK
+ * 1. Prefer primary keys declared by the source schema (OData <Key>, JDBC PK, OpenAPI ID metadata)
+ * 2. Look for field named "id", "key", or ending with "_id"
+ * 3. If no stable source key exists, use IdentityStrategy.ROW_HASH.
+ * 4. First-field fallback is a last resort for sources that require a selected source key.
  */
 private void identifyPrimaryKeys(ObjectMetadata object) {
     List<FieldMetadata> fields = object.getFields();
@@ -360,22 +396,27 @@ private void identifyPrimaryKeys(ObjectMetadata object) {
             name.endsWith("_id") && name.length() > 3 ||
             name.equals(object.getName() + "_id")) {
 
-            field.setPrimaryKey(true);
-            field.setNullable(false);
+            field.setSourcePrimaryKey(true);
+            field.setNillable(false);
             hasPk = true;
             log.debug("Identified primary key: {}", field.getName());
             break;  // Usually only one PK
         }
     }
 
-    // Fallback: use first field if no PK found
-    if (!hasPk && !fields.isEmpty()) {
+    // Last-resort fallback: enable only when this source requires a selected source key
+    // and the field order is stable/documented enough to trust.
+    boolean allowFirstFieldFallback = false;
+    if (!hasPk && allowFirstFieldFallback && !fields.isEmpty()) {
         FieldMetadata firstField = fields.get(0);
-        firstField.setPrimaryKey(true);
-        firstField.setNullable(false);
-        log.warn("No obvious PK for {}, using first field: {}",
+        firstField.setSourcePrimaryKey(true);
+        firstField.setNillable(false);
+        hasPk = true;
+        log.warn("No declared PK for {}, using first field as last-resort key: {}",
                  object.getName(), firstField.getName());
     }
+
+    object.setIdentityStrategy(hasPk ? IdentityStrategy.SOURCE_KEY : IdentityStrategy.ROW_HASH);
 }
 ```
 
@@ -402,8 +443,8 @@ Cursor fields enable incremental sync. There are THREE valid patterns:
 private void identifyCursorFields(ObjectMetadata object) {
     for (FieldMetadata field : object.getFields()) {
         if (isCursorCandidate(field)) {
-            field.setCursorField(true);
             field.setSourceCursorField(true);
+            field.setCursorCapable(true);
             field.setFilterable(true);
             log.debug("Identified cursor field: {} (type: {})",
                       field.getName(), field.getOriginalDataType());
@@ -419,7 +460,9 @@ private boolean isCursorCandidate(FieldMetadata field) {
     CanonicalType type = field.getCanonicalType();
 
     // Timestamp fields with modification semantics
-    if (type == CanonicalType.INSTANT || type == CanonicalType.LOCALDATE) {
+    if (type == CanonicalType.INSTANT ||
+        type == CanonicalType.LOCALDATETIME ||
+        type == CanonicalType.LOCALDATE) {
         return name.contains("modified") ||
                name.contains("updated") ||
                name.contains("changed") ||
@@ -444,14 +487,18 @@ private boolean isCursorCandidate(FieldMetadata field) {
 for (SourceField sourceField : sourceSchema) {
     FieldMetadata field = new FieldMetadata();
     field.setName(normalizeFieldName(sourceField.getName()));
-    field.setCanonicalType(mapType(sourceField.getType()));
+    field.setOriginalName(sourceField.getName());
+    CanonicalType canonicalType = mapType(sourceField.getType());
+    field.setCanonicalType(canonicalType);
     field.setOriginalDataType(sourceField.getType());  // CRITICAL
+    field.setPrimaryKeyCapable(FieldCapabilityUtil.isPrimaryKeyCapable(canonicalType));
+    field.setCursorCapable(FieldCapabilityUtil.isCursorCapable(canonicalType));
 
     // Check if this is the cursor field
     if (sourceField.getName().equalsIgnoreCase("ModifiedDate") ||
         sourceField.getName().equalsIgnoreCase("LastModifiedTime")) {
-        field.setCursorField(true);
         field.setSourceCursorField(true);
+        field.setCursorCapable(true);
         field.setFilterable(true);
     }
 
@@ -474,8 +521,8 @@ public class {Name}MetadataUtil {
     public static void identifyCursorFields(ObjectMetadata object) {
         for (FieldMetadata field : object.getFields()) {
             if (isCursorCandidate(field)) {
-                field.setCursorField(true);
                 field.setSourceCursorField(true);
+                field.setCursorCapable(true);
                 field.setFilterable(true);
             }
         }
@@ -490,7 +537,9 @@ public class {Name}MetadataUtil {
 
 **CRITICAL**: Whichever pattern you use, you MUST:
 1. Call `setCursorFieldLocked(true)` on the ObjectMetadata
-2. Set `setCursorField(true)`, `setSourceCursorField(true)`, and `setFilterable(true)` on cursor fields
+2. Set `setSourceCursorField(true)`, `setCursorCapable(true)`, and `setFilterable(true)` on source-discovered cursor fields
+
+Do not set `setPrimaryKey(true)` or `setCursorField(true)` in source schema discovery. Those are effective runtime/user-selection flags populated by the metadata merge layer from `sourcePrimaryKey` and `sourceCursorField` unless the user overrides them.
 
 ---
 
@@ -528,8 +577,9 @@ public SchemaResponse schema(SchemaRequest request) throws ConnectorException {
 private ObjectMetadata createJourneySchema() {
     ObjectMetadata object = new ObjectMetadata();
     object.setName("journey");
-    object.setDisplayName("Journey");
-    object.setCategory("Interactions");
+    object.setFullyQualifiedName("journey");
+    object.setType("TABLE");
+    object.setObjectType(ObjectType.PRIMARY);
     object.setDescription("Marketing journeys");
 
     // Store endpoint for read() phase
@@ -539,20 +589,20 @@ private ObjectMetadata createJourneySchema() {
     List<FieldMetadata> fields = new ArrayList<>();
 
     // Primary key field
-    fields.add(createField("id", "ID", CanonicalType.STRING, "String", true, "id"));
+    fields.add(createField("id", "ID", CanonicalType.STRING, "String", true));
 
     // Regular fields - note originalDataType for each!
-    fields.add(createField("key", CanonicalType.STRING, "String", "key"));
-    fields.add(createField("name", CanonicalType.STRING, "String", "name"));
-    fields.add(createField("version", CanonicalType.LONG, "Integer", "version"));
-    fields.add(createField("status", CanonicalType.STRING, "String", "status"));
-    fields.add(createField("description", CanonicalType.STRING, "String", "description"));
-    fields.add(createField("created_date", CanonicalType.INSTANT, "DateTime", "createdDate"));
-    fields.add(createField("modified_date", CanonicalType.INSTANT, "DateTime", "modifiedDate"));
-    fields.add(createField("category_id", CanonicalType.LONG, "Integer", "categoryId"));
-    fields.add(createField("entry_mode", CanonicalType.STRING, "String", "entryMode"));
-    fields.add(createField("goals", CanonicalType.JSON, "Object", "goals"));
-    fields.add(createField("activities", CanonicalType.JSON, "Array", "activities"));
+    fields.add(createField("key", CanonicalType.STRING, "String"));
+    fields.add(createField("name", CanonicalType.STRING, "String"));
+    fields.add(createField("version", CanonicalType.LONG, "Integer"));
+    fields.add(createField("status", CanonicalType.STRING, "String"));
+    fields.add(createField("description", CanonicalType.STRING, "String"));
+    fields.add(createField("created_date", CanonicalType.INSTANT, "DateTime"));
+    fields.add(createField("modified_date", CanonicalType.INSTANT, "DateTime"));
+    fields.add(createField("category_id", CanonicalType.LONG, "Integer"));
+    fields.add(createField("entry_mode", CanonicalType.STRING, "String"));
+    fields.add(createField("goals", CanonicalType.JSON, "Object"));
+    fields.add(createField("activities", CanonicalType.JSON, "Array"));
 
     object.setFields(fields);
 
@@ -560,7 +610,10 @@ private ObjectMetadata createJourneySchema() {
     identifyPrimaryKeys(object);    // Sets 'id' as PK
     identifyCursorFields(object);   // Sets 'modified_date' as cursor
 
-    object.setIncrementalSyncSupported(true);
+    boolean hasCursor = object.getFields().stream()
+        .anyMatch(field -> Boolean.TRUE.equals(field.getSourceCursorField()));
+    object.setIncrementalStrategy(
+        hasCursor ? IncrementalStrategy.COLUMN_CURSOR : IncrementalStrategy.UNSUPPORTED);
 
     return object;
 }
@@ -612,8 +665,9 @@ private List<ObjectMetadata> discoverDataExtensions(String token) throws IOExcep
 
         ObjectMetadata object = new ObjectMetadata();
         object.setName(objectName);
-        object.setDisplayName(de.getName());
-        object.setCategory("Data Extensions");
+        object.setFullyQualifiedName(objectName);
+        object.setType("TABLE");
+        object.setObjectType(ObjectType.PRIMARY);
         object.setDescription(de.getDescription());
 
         // Store DE key for read() phase
@@ -628,12 +682,17 @@ private List<ObjectMetadata> discoverDataExtensions(String token) throws IOExcep
         for (DataExtensionField deField : deFields) {
             FieldMetadata field = new FieldMetadata();
             field.setName(normalizeFieldName(deField.getName()));
-            field.setDisplayName(deField.getName());
-            field.setCanonicalType(mapSfmcType(deField.getFieldType()));
+            field.setOriginalName(deField.getName());
+            field.setLabel(deField.getName());
+            CanonicalType canonicalType = mapSfmcType(deField.getFieldType());
+            field.setCanonicalType(canonicalType);
             field.setOriginalDataType(deField.getFieldType());  // CRITICAL
-            field.setSourcePath(deField.getName());
-            field.setPrimaryKey(deField.getIsPrimaryKey());
-            field.setNullable(!deField.getIsRequired());
+            field.setPrimaryKeyCapable(FieldCapabilityUtil.isPrimaryKeyCapable(canonicalType));
+            field.setCursorCapable(FieldCapabilityUtil.isCursorCapable(canonicalType));
+            if (Boolean.TRUE.equals(deField.getIsPrimaryKey())) {
+                field.setSourcePrimaryKey(true);
+            }
+            field.setNillable(!deField.getIsRequired());
 
             fields.add(field);
         }
@@ -642,11 +701,16 @@ private List<ObjectMetadata> discoverDataExtensions(String token) throws IOExcep
 
         // Identify cursor fields for this DE
         identifyCursorFields(object);
+        boolean hasPrimaryKey = object.getFields().stream()
+            .anyMatch(field -> Boolean.TRUE.equals(field.getSourcePrimaryKey()));
+        object.setIdentityStrategy(
+            hasPrimaryKey ? IdentityStrategy.SOURCE_KEY : IdentityStrategy.ROW_HASH);
 
         // Check if incremental sync is possible
         boolean hasCursor = object.getFields().stream()
-            .anyMatch(FieldMetadata::isCursorField);
-        object.setIncrementalSyncSupported(hasCursor);
+            .anyMatch(field -> Boolean.TRUE.equals(field.getSourceCursorField()));
+        object.setIncrementalStrategy(
+            hasCursor ? IncrementalStrategy.COLUMN_CURSOR : IncrementalStrategy.UNSUPPORTED);
 
         objects.add(object);
     }
@@ -738,12 +802,11 @@ private CanonicalType mapSfmcType(String sfmcType) {
 ### Automated Checks
 
 ```bash
-# 1. Compile the project
-cd connectors/supaflow-connector-{name}
-mvn compile
+# 1. Compile from the platform root with reactor dependencies
+cd <platform-root>
+mvn -pl connectors/supaflow-connector-{name} -am compile
 
 # 2. Run verification script
-cd ../..
 bash <skill-root>/scripts/verify_connector.sh {name} <platform-root>
 ```
 
@@ -751,7 +814,7 @@ bash <skill-root>/scripts/verify_connector.sh {name} <platform-root>
 
 | Check | Expected Result |
 |-------|-----------------|
-| CHECK 4 | ✓ FieldMetadata requirements (originalDataType, canonicalType) |
+| CHECK 3.5 | ✓ ObjectMetadata + FieldMetadata requirements |
 | CHECK 12 | ✓ Primary key and cursor field identification |
 | CHECK 13 | ✓ Cursor field setting invoked in schema() |
 | Previous checks | Still passing |
@@ -764,18 +827,26 @@ Before proceeding to Phase 5, confirm ALL of the following:
 |-------|--------------|
 | ☐ schema(request) returns at least one ObjectMetadata | Run schema(request) |
 | ☐ Every ObjectMetadata has a name | Code review |
+| ☐ Every ObjectMetadata has `fullyQualifiedName` set | Code review |
+| ☐ Every ObjectMetadata has `type` set, usually `"TABLE"` | Code review |
+| ☐ Every ObjectMetadata has `incrementalStrategy` set to `COLUMN_CURSOR`, `CONNECTOR_MANAGED`, or `UNSUPPORTED` | Code review |
+| ☐ No ObjectMetadata uses legacy `IncrementalStrategy.NONE` | Code review |
+| ☐ Every ObjectMetadata has `identityStrategy` set to `SOURCE_KEY` or `ROW_HASH` | Code review |
+| ☐ Normal source objects set `objectType` to `ObjectType.PRIMARY` unless they are association/history/metadata objects | Code review |
 | ☐ Every ObjectMetadata has at least one field | Code review |
 | ☐ Permanently unsupported objects/fields use an existing `MetadataSkipReason`; new enum values were not added without frontend wizard analysis | Code review |
 | ☐ Objects/fields marked `UNSUPPORTED_TYPE` are genuinely permanent/non-fixable, not permissions or transient source errors | Code review |
 | ☐ Every FieldMetadata has `name` set | Code review |
 | ☐ **CRITICAL**: Every FieldMetadata has `originalDataType` set | `grep -c "setOriginalDataType"` |
 | ☐ Every FieldMetadata has `canonicalType` set | Code review |
-| ☐ At least one field per object is marked as primaryKey | Code review |
+| ☐ Every FieldMetadata has `primaryKeyCapable` and `cursorCapable` set | Code review |
+| ☐ Every BIGDECIMAL field has precision `1..38` and scale `0..min(37, precision)` | Code review |
+| ☐ Fields set `sourcePrimaryKey` / `sourceCursorField` only for true defaults, never `false` | Code review |
 | ☐ identifyCursorFields() or equivalent is called | Code review |
 | ☐ setCursorFieldLocked(true) is called on each object | Code review |
 | ☐ customAttributes store info needed for read() | Code review |
 | ☐ Sample-based connectors use `SchemaGenerator` + `RecordSupplier` (not ad-hoc guessing in multiple places) | Code review |
-| ☐ CHECK 4, 12, 13 pass | Verification script |
+| ☐ CHECK 3.5, 12, 13 pass | Verification script |
 
 ### Verification Commands
 
@@ -783,19 +854,22 @@ Before proceeding to Phase 5, confirm ALL of the following:
 # Count setOriginalDataType calls (should be > 0 for each object)
 grep -c "setOriginalDataType" src/main/java/**/*.java
 
+# Check required object metadata strategies
+grep -n "setType\|setIncrementalStrategy\|setIdentityStrategy" src/main/java/**/*.java
+
 # Check for cursor field handling
-grep -n "setCursorField\|identifyCursorFields\|setCursorFieldLocked" src/main/java/**/*.java
+grep -n "setSourceCursorField\|identifyCursorFields\|setCursorFieldLocked" src/main/java/**/*.java
 
 # Check for primary key handling
-grep -n "setPrimaryKey" src/main/java/**/*.java
+grep -n "setSourcePrimaryKey" src/main/java/**/*.java
 ```
 
 ### Show Your Work
 
 Before proceeding to Phase 5, show:
 
-1. Output of `mvn compile`
-2. Output of `bash <skill-root>/scripts/verify_connector.sh {name} <platform-root>` (CHECKs 4, 12, 13)
+1. Output of `mvn -pl connectors/supaflow-connector-{name} -am compile`
+2. Output of `bash <skill-root>/scripts/verify_connector.sh {name} <platform-root>` (CHECKs 3.5, 12, 13)
 3. Sample ObjectMetadata output (object name, field count, PK field, cursor field)
 4. Confirmation that originalDataType is set on every field
 

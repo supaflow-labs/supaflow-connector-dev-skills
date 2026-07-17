@@ -167,9 +167,14 @@ Use `CutoffTimeSyncUtils` for cursor handling - it handles all edge cases automa
 
 ```java
 import io.supaflow.connector.sdk.metadata.FilterCondition;
+import io.supaflow.connector.sdk.mapping.CanonicalTypeUtil;
 import io.supaflow.connector.sdk.util.CutoffTimeSyncUtils;
 import io.supaflow.connector.sdk.util.SyncStateResponseBuilder;
 import java.util.stream.Collectors;
+
+// Connector-owned configuration, populated from connectionProperties in init().
+// ReadRequest does not expose a lookback-time accessor.
+private int lookbackTimeSeconds = 0;
 
 @Override
 public ReadResponse read(ReadRequest request) throws ConnectorException {
@@ -194,6 +199,9 @@ public ReadResponse read(ReadRequest request) throws ConnectorException {
         String apiType = objectMetadata.getCustomAttributes().get("api_type");
         RecordProcessor processor = request.getRecordProcessor();
 
+        // Routing by api_type is optional. Use it for multi-surface connectors
+        // such as SFMC; metadata-driven connectors can route directly by object
+        // metadata, endpoint custom attributes, or source object name.
         if ("REST".equals(apiType)) {
             readRestObject(objectMetadata, request, processor);
         } else if ("SOAP".equals(apiType)) {
@@ -398,11 +406,14 @@ private String buildQueryUrl(String endpoint,
     }
 
     // Let SDK build lower/upper bounds based on syncState + cutoffTime.
+    // Lookback is connector-owned configuration, not a ReadRequest field.
+    // Example: load lookbackTimeSeconds from connectionProperties during init().
+    int lookbackSeconds = Math.max(0, lookbackTimeSeconds);
     List<FilterCondition> syncFilters = CutoffTimeSyncUtils.buildFiltersWithCutoff(
         request,
         cursorFieldName,
         cutoffTimeStr,
-        lookbackTimeSeconds
+        lookbackSeconds
     );
 
     if (!syncFilters.isEmpty()) {
@@ -499,7 +510,13 @@ See `SalesforceTimeBasedSyncUtils` in the Salesforce connector for a production 
 
 ## Step 3: Extract Records with Proper Type Conversion
 
+The record map sent to `RecordProcessor.processRecord(...)` should contain canonical string values. `CursorTrackingCSVRecordProcessor` writes values by stringifying them and parses cursor values as ISO strings, so do not emit raw typed Java values such as `Instant`, `Long`, or `Boolean` as the final contract. Normalize source-specific raw formats first, then call `CanonicalTypeUtil.convertToCanonicalValue(rawValue, canonicalType)`.
+
 ```java
+import io.supaflow.connector.sdk.mapping.CanonicalTypeUtil;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
 /**
  * Extract record from API response, mapping field names and types.
  */
@@ -507,20 +524,27 @@ private Map<String, Object> extractRecord(JsonNode item, ObjectMetadata metadata
     Map<String, Object> record = new HashMap<>();
 
     for (FieldMetadata field : metadata.getFields()) {
-        String sourcePath = field.getSourcePath();
         String fieldName = field.getName();
+        String sourceFieldName = field.getOriginalName() != null
+            ? field.getOriginalName()
+            : fieldName;
 
-        // Get value from JSON using source path
-        JsonNode value = getJsonValue(item, sourcePath);
+        // Get value from JSON using the source field name. FieldMetadata has no
+        // sourcePath property; for flat sources the field name/originalName is
+        // the path. If a connector needs nested JSON paths, store that real
+        // source key in originalName during schema discovery.
+        JsonNode value = getJsonValue(item, sourceFieldName);
 
         if (value == null || value.isNull()) {
             record.put(fieldName, null);
             continue;
         }
 
-        // Convert based on canonical type
-        Object convertedValue = convertValue(value, field.getCanonicalType());
-        record.put(fieldName, convertedValue);
+        // Normalize source-specific raw values, then emit canonical strings.
+        Object rawValue = extractRawValue(value, field.getCanonicalType());
+        String canonicalValue = CanonicalTypeUtil.convertToCanonicalValue(
+            rawValue, field.getCanonicalType());
+        record.put(fieldName, canonicalValue);
     }
 
     return record;
@@ -548,9 +572,10 @@ private JsonNode getJsonValue(JsonNode root, String path) {
 }
 
 /**
- * Convert JSON value to appropriate Java type.
+ * Convert JSON value to a raw value that CanonicalTypeUtil can canonicalize.
+ * Source-specific non-ISO timestamp formats must be normalized here first.
  */
-private Object convertValue(JsonNode value, CanonicalType type) {
+private Object extractRawValue(JsonNode value, CanonicalType type) {
     if (value == null || value.isNull()) {
         return null;
     }
@@ -559,20 +584,27 @@ private Object convertValue(JsonNode value, CanonicalType type) {
         case STRING:
             return value.asText();
 
+        case SHORT:
+        case INT:
         case LONG:
             return value.asLong();
 
+        case FLOAT:
         case DOUBLE:
             return value.asDouble();
+
+        case BIGDECIMAL:
+            return value.decimalValue();
 
         case BOOLEAN:
             return value.asBoolean();
 
         case INSTANT:
-            return parseTimestamp(value.asText());
+            return normalizeInstantRawValue(value.asText());
 
         case LOCALDATE:
-            return LocalDate.parse(value.asText());
+        case LOCALDATETIME:
+            return value.asText();
 
         case JSON:
             // Return as string representation
@@ -583,26 +615,20 @@ private Object convertValue(JsonNode value, CanonicalType type) {
     }
 }
 
-private Instant parseTimestamp(Object value) {
-    if (value == null) {
-        return null;
+private Object normalizeInstantRawValue(String value) {
+    if (value == null || value.isBlank()) {
+        return value;
     }
 
-    String str = value.toString();
-    try {
-        // Try ISO 8601 format
-        return Instant.parse(str);
-    } catch (Exception e) {
-        try {
-            // Try other common formats
-            DateTimeFormatter formatter = DateTimeFormatter.ofPattern(
-                "yyyy-MM-dd'T'HH:mm:ss[.SSS][XXX][X]");
-            return Instant.from(formatter.parse(str));
-        } catch (Exception e2) {
-            log.warn("Failed to parse timestamp: {}", str);
-            return null;
-        }
+    // Example source-specific normalization: Microsoft JSON date
+    // /Date(1705073533000+0000)/ -> epoch milliseconds.
+    Matcher matcher = Pattern.compile("/Date\\((\\d+)([+-]\\d{4})?\\)/").matcher(value);
+    if (matcher.matches()) {
+        return Long.parseLong(matcher.group(1));
     }
+
+    // ISO-8601 strings can flow directly to CanonicalTypeUtil.
+    return value;
 }
 ```
 
@@ -811,7 +837,9 @@ public ReadResponse read(ReadRequest request) throws ConnectorException {
     // Get cutoffTime at START - this will be the new cursor value
     String cutoffTimeStr = CutoffTimeSyncUtils.formatCutoffTimeIso(syncState);
 
-    // Route to appropriate reader based on object type
+    // Route to appropriate reader based on object type.
+    // api_type routing is optional; metadata-driven connectors can route by
+    // object name, endpoint custom attributes, or declared source metadata.
     String apiType = metadata.getCustomAttributes().get("api_type");
 
     if ("REST".equals(apiType)) {
@@ -871,12 +899,11 @@ public void close() throws Exception {
 ### Automated Checks
 
 ```bash
-# 1. Compile the project
-cd connectors/supaflow-connector-{name}
-mvn compile
+# 1. Compile from the platform root with reactor dependencies
+cd <platform-root>
+mvn -pl connectors/supaflow-connector-{name} -am compile
 
 # 2. Run verification script
-cd ../..
 bash <skill-root>/scripts/verify_connector.sh {name} <platform-root>
 ```
 
@@ -899,7 +926,7 @@ Before proceeding to Phase 6, confirm ALL of the following:
 | ☐ read() extracts SyncState from request | Code review |
 | ☐ read() checks isInitialSync() | Code review |
 | ☐ read() uses cursorPosition for incremental | Code review |
-| ☐ read() respects lookbackTimeSeconds | Code review |
+| ☐ read() passes connector-configured lookback seconds to `CutoffTimeSyncUtils.buildFiltersWithCutoff()` | Code review |
 | ☐ read() applies historicalSyncStartDate | Code review |
 | ☐ processor.processRecord() called for each record | Code review |
 | ☐ processor.close() is NEVER called | `grep -n "processor.close"` should find nothing |
@@ -921,7 +948,8 @@ grep -n "processor.close" src/main/java/**/*.java
 # Check for SyncState handling
 grep -n "isInitialSync\|getCursorPosition\|SyncState" src/main/java/**/*.java
 
-# Check for lookback handling
+# Check for lookback handling. ReadRequest has no lookback-time accessor;
+# lookback should come from connector configuration.
 grep -n "lookbackTimeSeconds\|lookback\|getLookback" src/main/java/**/*.java
 ```
 
@@ -929,7 +957,7 @@ grep -n "lookbackTimeSeconds\|lookback\|getLookback" src/main/java/**/*.java
 
 Before proceeding to Phase 6, show:
 
-1. Output of `mvn compile`
+1. Output of `mvn -pl connectors/supaflow-connector-{name} -am compile`
 2. Output of `bash <skill-root>/scripts/verify_connector.sh {name} <platform-root>` (ALL 15 checks)
 3. Demonstration of read() handling:
    - Initial sync (full data)
@@ -944,13 +972,13 @@ Before proceeding to Phase 6, show:
 |---------|----------------|------------------|
 | **Calling processor.close()** | Executor manages lifecycle | Never call close |
 | **Ignoring SyncState** | Every sync is full sync | Always check isInitialSync/cursorPosition |
-| **Ignoring lookbackTimeSeconds** | Misses late-arriving data | Use `CutoffTimeSyncUtils.buildFiltersWithCutoff()` |
+| **Ignoring connector-configured lookback seconds** | Misses late-arriving data | Pass connector config into `CutoffTimeSyncUtils.buildFiltersWithCutoff(...)`; `ReadRequest` has no lookback getter |
 | **Using raw maxCursorSeen without a boundary strategy** | Breaks on null cursors, equal-cursor bursts, or non-deterministic windows | Use `cutoffTime`, `recordCount`, or `customState.incremental_boundary` based on source behavior |
 | **Manually building cursor position** | Error-prone, inconsistent | Use `CutoffTimeSyncUtils` - it handles all cases |
 | **Wrong pagination** | Missing data or infinite loops | Match API's actual pagination pattern |
 | **Ignoring historicalSyncStartDate** | Syncs too much data | Apply on initial sync |
 | **hasMore always false** | Breaks continuation | Set based on actual pagination state |
-| **Not handling all object types** | Some objects can't be read | Route by api_type attribute |
+| **Not handling all object types** | Some objects can't be read | Route by `api_type` only when the connector uses that custom attribute; otherwise route by declared object metadata |
 | **Hardcoding page size** | May exceed API limits | Use API-appropriate sizes |
 
 ---

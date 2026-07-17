@@ -48,21 +48,21 @@ test_credentials: STRIPE_API_KEY
 
 | Phase | File | Purpose | Gate Checks |
 |-------|------|---------|-------------|
-| 1 | `PHASE_1_PROJECT_SETUP.md` | Project structure, pom.xml, shell class | 9, 14 |
-| 2 | `PHASE_2_CONNECTOR_IDENTITY.md` | getType, getName, properties, capabilities | 5, 6, 11 |
+| 1 | `PHASE_1_PROJECT_SETUP.md` | Project structure, pom.xml, shell class | 9, 14, 25 |
+| 2 | `PHASE_2_CONNECTOR_IDENTITY.md` | getType, getName, properties, capabilities | 4, 5, 6, 11, 26 |
 | 3 | `PHASE_3_CONNECTION_AUTH.md` | setRuntimeContext, init, OAuth | 7, 10 |
-| 4 | `PHASE_4_SCHEMA_DISCOVERY.md` | schema(), ObjectMetadata, FieldMetadata | 4, 12, 13 |
+| 4 | `PHASE_4_SCHEMA_DISCOVERY.md` | schema(), ObjectMetadata, FieldMetadata | 3.5, 12, 13 |
 | 5 | `PHASE_5_READ_OPERATIONS.md` | read(), SyncStateRequest, RecordProcessor | 1, 2, 3, 8 |
 | 6 | `PHASE_6_INTEGRATION_TESTING.md` | IT tests, verification | 15 |
-| 7 | `PHASE_7_WRITE_OPERATIONS.md` | Warehouse destinations: stage(), load() | 3, 12 |
+| 7 | `PHASE_7_WRITE_OPERATIONS.md` | Structured destinations: database/warehouse/file stage(), load() | 16-24, 27 |
 | 8 | `PHASE_8_ACTIVATION_TARGETS.md` | API destinations: activation mappings | 3, 12 |
 | - | `ANTI_PATTERNS.md` | Common mistakes to avoid | All |
 | JDBC | `JDBC_CONNECTOR_GUIDE.md` | **Replaces phases 3-5 for JDBC connectors** | JDBC-specific |
 
-**JDBC Connectors**: If the connector extends `BaseJdbcConnector` (uses a JDBC driver), follow `JDBC_CONNECTOR_GUIDE.md` instead of phases 3-5. The base class handles read(), schema(), cursor fields, and cancellation. You only implement `validateAndSetConnectorProperties()`, `mapTypeByName()`, `convertToCanonicalValue()`, and source-only stubs.
+**JDBC Connectors**: If the connector extends `BaseJdbcConnector` (uses a JDBC driver), follow `JDBC_CONNECTOR_GUIDE.md` instead of phases 3-5. The base class handles read(), schema(), cursor fields, SQL script execution, and cancellation. Source-only JDBC connectors implement source-only stubs. JDBC source+destination connectors then add Phase 7 using the Postgres direct-load pattern.
 
 **Destination Phases**:
-- **Phase 7**: For warehouse destinations (Snowflake, BigQuery) - creates tables/schemas via DDL
+- **Phase 7**: For structured destinations that create/manage tables or files: direct JDBC databases (Postgres, SQL Server), staged warehouses (Snowflake, BigQuery), and file/lake destinations.
 - **Phase 8**: For API destinations (Salesforce, HubSpot) - maps to existing objects, no DDL
 
 ## How to Use These Skills
@@ -77,7 +77,7 @@ test_credentials: STRIPE_API_KEY
 ### For Agents Building Connectors
 
 1. **Read phases sequentially** - Don't skip ahead
-2. **Complete gate verification** before proceeding to next phase
+2. **Complete the current phase's gate verification** before proceeding to next phase
 3. **Read prerequisite classes** listed at the start of each phase
 4. **Check ANTI_PATTERNS.md** before and after implementation
 5. **Run verification script** after each phase
@@ -96,21 +96,21 @@ Build a {ConnectorName} connector following the phased skill approach:
    - Phase 4: Schema Discovery → Run gate verification
    - Phase 5: Read Operations → Run gate verification
    - Phase 6: Integration Testing → Run gate verification
-   - Phase 7: Write Operations (warehouse destinations like Snowflake)
+   - Phase 7: Write Operations (structured destinations like Postgres, SQL Server, Snowflake)
    - Phase 8: Activation Targets (API destinations like Salesforce)
 
 3. For each phase:
    - Read the ESSENTIAL READING section first
    - Read the actual core class files listed
    - Implement following the examples
-   - Run gate verification before proceeding
+   - Run gate verification before proceeding; fix current-phase check failures and treat later-phase failures as expected until those phases are complete
 
-4. Build a connector-specific implementation prompt from your target API and connector mode (source, destination-warehouse, destination-activation).
+4. Build a connector-specific implementation prompt from your target API and connector mode (source, destination-database, destination-warehouse, destination-activation, hybrid).
 
 5. Final verification: bash <skill-root>/scripts/verify_connector.sh {name} {platform-root}
-   All checks must pass (15 source + 9 destination if applicable).
+   All applicable final-state checks must pass (source checks, setup/dependency/cancellation checks, and destination checks if applicable).
 
-DO NOT proceed to next phase until current phase passes.
+DO NOT proceed to next phase until the current phase's listed checks pass.
 Show gate verification output before moving on.
 ```
 
@@ -124,9 +124,8 @@ bash ./scripts/verify_connector.sh {connector-name} {platform-root}
 export SUPAFLOW_PLATFORM_ROOT={platform-root}
 bash ./scripts/verify_connector.sh {connector-name}
 
-# Expected: All checks pass
-# - Source connectors: 15 checks
-# - Destination connectors: +9 additional checks (16-24)
+# Expected for final-state verification: all applicable checks pass.
+# During phased work, only the phase's listed checks are expected to be clean.
 ```
 
 ## Directory Structure
@@ -160,22 +159,23 @@ build-supaflow-connector/
 | `supaflow-connector-hubspot` | OAuth2 Auth Code | V2 architecture, YAML config |
 | `supaflow-connector-oracle-tm` | Basic Auth | Time-based incremental sync |
 | `supaflow-connector-salesforce` | OAuth2 + SOAP | Utility classes, bulk API |
-| `supaflow-connector-postgres` | JDBC | **JDBC source+destination reference** (BaseJdbcConnector, convertToCanonicalValue, mapTypeByName) |
+| `supaflow-connector-postgres` | JDBC | **JDBC source+destination reference** (direct local CSV load, BaseJdbcConnector, convertToCanonicalValue, mapTypeByName) |
 | `supaflow-connector-generic-jdbc` | JDBC | **JDBC source-only reference** (minimal BaseJdbcConnector subclass) |
-| `supaflow-connector-snowflake` | JDBC + Stage | **Warehouse destination (Phase 7)** |
+| `supaflow-connector-snowflake` | JDBC + Stage | **Staged warehouse destination (Phase 7)** |
 | `supaflow-connector-salesforce` | OAuth2 + SOAP | **Activation destination (Phase 8)** |
 | `supaflow-connector-salesforce-marketing-cloud` | OAuth2 | SFMC patterns, REST + SOAP |
 
 ## Gate Verification Mapping
 
-### Source Connector Checks (1-15)
+### Source and Shared Checks
 
 | Check | What It Verifies | Phase |
 |-------|-----------------|-------|
 | 1 | RecordProcessor lifecycle | 5 |
 | 2 | DatasourceInitResponse usage | 3, 5 |
 | 3 | Required methods implementation | 5 |
-| 4 | FieldMetadata requirements | 4 |
+| 3.5 | ObjectMetadata and FieldMetadata requirements | 4 |
+| 4 | Version management | 2 |
 | 5 | Connector capabilities | 2 |
 | 6 | Property annotations | 2 |
 | 7 | Connection management | 3 |
@@ -187,6 +187,9 @@ build-supaflow-connector/
 | 13 | Cursor field setting invoked | 4 |
 | 14 | Build artifacts not committed | 1 |
 | 15 | Integration tests exist | 6 |
+| 25 | Parent POM module registration | 1 |
+| 26 | Dependency version management | 2 |
+| 27 | Cancellation support | 3, 4, 5 |
 
 ### Destination Connector Checks (16-24)
 
@@ -198,10 +201,10 @@ Auto-detected when connector has `REPLICATION_DESTINATION` or `REVERSE_ETL_DESTI
 | 17 | mapToTargetObject() implementation | 7, 8 |
 | 18 | load() implementation | 7, 8 |
 | 19 | stage() implementation | 7, 8 |
-| 20 | Staging/COPY INTO (warehouse) OR activation_target (activation) | 7, 8 |
-| 21 | MERGE (warehouse) OR activation_target_field (activation) | 7, 8 |
-| 22 | LoadMode handling (warehouse) OR merge_keys (activation) | 7, 8 |
-| 23 | DDL generation (warehouse) OR error/success processors (activation) | 7, 8 |
+| 20 | Direct CSV/COPY load (database) OR staging/COPY INTO (warehouse) OR activation_target (activation) | 7, 8 |
+| 21 | MERGE/upsert implementation OR activation_target_field (activation) | 7, 8 |
+| 22 | LoadMode handling OR merge_keys (activation) | 7, 8 |
+| 23 | DDL/schema evolution OR error/success processors (activation) | 7, 8 |
 | 24 | Destination integration tests | 7, 8 |
 
 **Note**: Destination connectors must also implement identifier formatting methods from Phase 4 (`getIdentifierFormatter`, `getIdentifierQuoteString`, `getIdentifierSeparator`, `getFullyQualifiedSchemaName`, `getFullyQualifiedTableName`). The pipeline uses them during mapping even for file-based destinations.
@@ -213,6 +216,7 @@ These are mandatory in addition to `verify_connector.sh`:
 1. **API contract freshness**
    - All examples use `read(ReadRequest)` (not legacy multi-arg signatures).
    - `SyncStateRequest.getCursorPosition()` is treated as `List<IncrementalField>`, never as a scalar string.
+   - Source schema discovery sets `sourcePrimaryKey` and `sourceCursorField`; it does not set effective `primaryKey` or `cursorField` directly.
 
 2. **Incremental-window correctness**
    - Read examples use `CutoffTimeSyncUtils` for deterministic lower/upper bounds.
