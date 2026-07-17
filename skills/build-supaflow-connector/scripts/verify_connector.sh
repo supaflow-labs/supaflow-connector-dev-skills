@@ -77,7 +77,7 @@ if $IS_SOURCE_CONNECTOR && $IS_DESTINATION_CONNECTOR_EARLY; then
     echo ""
 elif $IS_SOURCE_CONNECTOR; then
     echo "ℹ️  Detected: SOURCE-ONLY Connector"
-    echo "   → Will skip destination checks (16-24)"
+    echo "   → Will skip destination checks"
     echo ""
 elif $IS_DESTINATION_CONNECTOR_EARLY; then
     echo "ℹ️  Detected: DESTINATION-ONLY Connector"
@@ -900,11 +900,22 @@ echo "  Icon Check:"
 # Derive expected icon filename from connector name
 if [[ -n "$CONNECTOR_DISPLAY_NAME" ]]; then
     ICON_FOUND=""
+    ICON_BUNDLED=""
     ICON_NAME_DISPLAY=$(echo "$CONNECTOR_DISPLAY_NAME" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/_/g' | sed 's/__*/_/g' | sed 's/^_//; s/_$//')
     ICON_NAME_DISPLAY_SIMPLE=$(echo "$CONNECTOR_DISPLAY_NAME" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]//g')
     ICON_PATH_ARTIFACT="../supaflow-www/public/connectors/${CONNECTOR_NAME}.svg"
     ICON_PATH_DISPLAY="../supaflow-www/public/connectors/${ICON_NAME_DISPLAY}.svg"
     ICON_PATH_DISPLAY_SIMPLE="../supaflow-www/public/connectors/${ICON_NAME_DISPLAY_SIMPLE}.svg"
+
+    if find "$CONNECTOR_DIR/src/main/resources" -name "*.svg" -print -quit 2>/dev/null | grep -q .; then
+        echo "✓ Found bundled SVG icon in connector resources"
+        ICON_BUNDLED="yes"
+        ICON_FOUND="yes"
+    elif grep -rq "<svg\|getResourceAsStream\|Base64\|ICON" "$CONNECTOR_SRC_DIR" --include="*.java" 2>/dev/null; then
+        echo "✓ Found getIcon() bundled/embedded icon implementation"
+        ICON_BUNDLED="yes"
+        ICON_FOUND="yes"
+    fi
 
     if [ -f "$ICON_PATH_ARTIFACT" ]; then
         echo "✓ Found icon: connectors/${CONNECTOR_NAME}.svg"
@@ -917,11 +928,23 @@ if [[ -n "$CONNECTOR_DISPLAY_NAME" ]]; then
         ICON_FOUND="yes"
     fi
 
+    if grep -rq "getIcon" "$CONNECTOR_SRC_DIR" --include="*.java" 2>/dev/null; then
+        if grep -R -A5 "getIcon" "$CONNECTOR_SRC_DIR" --include="*.java" 2>/dev/null | grep -q 'return[[:space:]]*""'; then
+            echo "❌ ERROR: getIcon() returns an empty icon"
+            echo "   → Connector deployment/UI expects a real icon"
+            ERRORS=$((ERRORS + 1))
+        fi
+    else
+        echo "⚠️  WARNING: Missing getIcon() implementation"
+        WARNINGS=$((WARNINGS + 1))
+    fi
+
     if [ -z "$ICON_FOUND" ]; then
         echo "⚠️  WARNING: No icon found at expected locations:"
         echo "   → Checked: connectors/${CONNECTOR_NAME}.svg"
         echo "   → Checked: connectors/${ICON_NAME_DISPLAY}.svg"
         echo "   → Checked: connectors/${ICON_NAME_DISPLAY_SIMPLE}.svg"
+        echo "   → Checked: connector resources and embedded getIcon() implementation"
         echo "   → Use placeholder icon or create new SVG"
         WARNINGS=$((WARNINGS + 1))
     fi
@@ -942,8 +965,8 @@ if $IS_JDBC_CONNECTOR; then
     echo "✓ Primary key identification handled by base class"
     echo "✓ Cursor field identification handled by base class"
 else
-    # REST connector - check for primary key identification
-    echo "ℹ️  REST connector - checking PK/cursor identification"
+    # REST connector - check for source-discovered primary key identification.
+    echo "ℹ️  REST connector - checking source PK/cursor identification"
 
     # Source discovery should set sourcePrimaryKey. The effective primaryKey
     # flag is owned by the metadata merge layer after user selection.
@@ -1008,7 +1031,7 @@ else
         else
             # identifyCursorFields() exists but might delegate or log
             if [[ "$HAS_INLINE_CURSOR" == "yes" ]]; then
-                echo "✓ Uses INLINE cursor field setting pattern"
+                echo "✓ Uses INLINE source cursor field setting pattern"
                 echo "   → setSourceCursorField() called directly during schema building"
             else
                 # Check if it just logs and returns (empty implementation)
@@ -1026,7 +1049,7 @@ else
         fi
     elif [[ "$HAS_INLINE_CURSOR" == "yes" ]]; then
         # No identifyCursorFields() method, but has inline cursor setting
-        echo "✓ Uses INLINE cursor field setting pattern"
+        echo "✓ Uses INLINE source cursor field setting pattern"
         echo "   → setSourceCursorField() called directly during schema building"
 
         # Verify accompanying fields
@@ -1257,7 +1280,7 @@ IS_DESTINATION_CONNECTOR=$IS_DESTINATION_CONNECTOR_EARLY
 
 if ! $IS_DESTINATION_CONNECTOR && $IS_SOURCE_CONNECTOR; then
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo "⏭  SKIPPING DESTINATION CHECKS (16-24)"
+    echo "⏭  SKIPPING DESTINATION CHECKS"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo "ℹ️  Connector is source-only - destination checks not applicable"
     echo ""
@@ -1368,7 +1391,7 @@ if $IS_DESTINATION_CONNECTOR; then
         # through activation metadata and resolve target objects/fields during load().
         if $IS_ACTIVATION_DESTINATION; then
             echo "ℹ️  Activation destination may use pass-through mapToTargetObject()"
-        elif grep -q "namespaceRules\.get\|namespaceRules\.apply\|getTableName\|getSchemaName\|getDatabaseName" "$CONNECTOR_FILE"; then
+        elif grep -rq "namespaceRules\.get\|namespaceRules\.apply\|getTableName\|getSchemaName\|getDatabaseName" "$CONNECTOR_SRC_DIR" --include="*.java" 2>/dev/null; then
             echo "✓ Applies NamespaceRules (pipeline prefix)"
         else
             echo "❌ ERROR: mapToTargetObject() does not apply NamespaceRules"
@@ -1523,17 +1546,17 @@ if $IS_DESTINATION_CONNECTOR; then
             fi
 
             # CRITICAL: Check for correct CSV file pattern
-            if grep -q "success_part_" "$STAGE_FILE"; then
-                echo "✓ Uses correct CSV file pattern (success_part_*.csv)"
+            if grep -rq "success_part_\|listSuccessParts\|StagedFiles" "$CONNECTOR_SRC_DIR" --include="*.java" 2>/dev/null; then
+                echo "✓ Uses production staged success-part discovery"
             else
                 echo "⚠️  WARNING: stage() may not use correct CSV file pattern"
-                echo "   → Platform writes: success_part_*.csv (not <table>_*.csv)"
-                echo "   → Should filter for files starting with 'success_part_'"
+                echo "   → Platform writes success_part_* data files (CSV/JSONL depending on format)"
+                echo "   → Should use StagedFiles or filter for success_part_*"
                 WARNINGS=$((WARNINGS + 1))
             fi
 
             # Check that it doesn't look for wrong patterns
-            if grep -A30 "public.*StageResponse stage" "$STAGE_FILE" | grep -q "tableName.*_\|tableName + \"_\""; then
+            if grep -R -A30 "public.*StageResponse stage" "$CONNECTOR_SRC_DIR" --include="*.java" 2>/dev/null | grep -q "tableName.*_\|tableName + \"_\""; then
                 echo "⚠️  WARNING: stage() may be using wrong file pattern (<table>_*.csv)"
                 echo "   → This will find zero files in production"
                 WARNINGS=$((WARNINGS + 1))
@@ -1841,7 +1864,7 @@ if $IS_DESTINATION_CONNECTOR; then
     if [[ -n "$IT_TEST_FILE" ]]; then
         echo "✓ Found IT test file(s): $IT_TEST_COUNT"
         # Check for destination-specific tests
-        if grep -R -q --include="*IT.java" "testLoad\|testWrite\|testUpsert" "$CONNECTOR_DIR/src/test" 2>/dev/null; then
+        if grep -R -q --include="*IT.java" "testLoad\|testWrite\|testUpsert\|LoadMode\|loadRows\|\\.load(" "$CONNECTOR_DIR/src/test" 2>/dev/null; then
             echo "✓ Has load/write test"
         else
             echo "⚠️  WARNING: Missing load/write test in IT"
@@ -1850,25 +1873,26 @@ if $IS_DESTINATION_CONNECTOR; then
 
         # CRITICAL: Check for realistic test data (not simplified)
         if grep -R -q --include="*IT.java" "success_part_" "$CONNECTOR_DIR/src/test"; then
-            echo "✓ Uses realistic CSV file patterns (success_part_*.csv)"
+            echo "✓ Uses realistic success_part_* file patterns"
         else
             echo "⚠️  WARNING: IT tests may use simplified CSV file names"
-            echo "   → Should use production patterns: success_part_*.csv"
-            echo "   → Simplified names don't catch CSV discovery issues"
+            echo "   → Should use production patterns: success_part_*.csv or success_part_*.jsonl"
+            echo "   → Simplified names don't catch stage file discovery issues"
             WARNINGS=$((WARNINGS + 1))
         fi
 
-        # Check for namespace prefix validation
-        if grep -R -q --include="*IT.java" "pipelinePrefix\|pipeline_prefix\|namespace.*prefix" "$CONNECTOR_DIR/src/test"; then
-            echo "✓ Tests namespace prefix application"
+        # Check for namespace-rules validation. Unit tests are acceptable here because
+        # mapToTargetObject() is deterministic and does not require live credentials.
+        if grep -R -q --include="*Test.java" --include="*IT.java" "NamespaceRules\|NamespaceRulesEnum\|pipelinePrefix\|pipeline_prefix\|namespace.*prefix" "$CONNECTOR_DIR/src/test" 2>/dev/null; then
+            echo "✓ Tests namespace rules application"
         else
-            echo "⚠️  WARNING: IT tests may not verify namespace prefix"
-            echo "   → Should test that mapToTargetObject() applies pipeline prefix"
+            echo "⚠️  WARNING: Tests may not verify namespace rules"
+            echo "   → Should test that mapToTargetObject() applies namespace rules"
             WARNINGS=$((WARNINGS + 1))
         fi
 
         if $IS_WAREHOUSE_DESTINATION; then
-            if grep -R -q --include="*IT.java" "testStage\|testCopyInto\|testMerge" "$CONNECTOR_DIR/src/test" 2>/dev/null; then
+            if grep -R -q --include="*IT.java" "testStage\|testCopyInto\|testMerge\|LoadMode.MERGE\|stageLocation" "$CONNECTOR_DIR/src/test" 2>/dev/null; then
                 echo "✓ Has staging/merge test"
             else
                 echo "⚠️  WARNING: Missing staging/merge test for staged destination"
@@ -1899,6 +1923,155 @@ if $IS_DESTINATION_CONNECTOR; then
     fi
 
     echo ""
+
+    # ==============================================================================
+    # CHECK 24.5: Warehouse Destination Maturity Gates
+    # ==============================================================================
+    if $IS_WAREHOUSE_DESTINATION; then
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "✓ CHECK 24.5: Warehouse Destination Maturity Gates"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+        if [[ -n "$IT_TEST_FILES" ]]; then
+            DEST_MISSING_MODES=()
+            for mode in APPEND MERGE OVERWRITE TRUNCATE_AND_LOAD; do
+                if grep -R -q --include="*IT.java" "LoadMode\.${mode}" "$CONNECTOR_DIR/src/test" 2>/dev/null; then
+                    echo "✓ IT covers LoadMode.${mode}"
+                else
+                    DEST_MISSING_MODES+=("$mode")
+                fi
+            done
+            if [ ${#DEST_MISSING_MODES[@]} -gt 0 ]; then
+                echo "❌ ERROR: Destination IT missing load mode coverage: ${DEST_MISSING_MODES[*]}"
+                echo "   → Warehouse destinations must prove APPEND, MERGE, OVERWRITE, and TRUNCATE_AND_LOAD"
+                ERRORS=$((ERRORS + 1))
+            fi
+
+            DEST_MISSING_TABLE_HANDLINGS=()
+            for handling in FAIL DROP MERGE; do
+                if grep -R -q --include="*IT.java" "DestinationTableHandling\.${handling}" "$CONNECTOR_DIR/src/test" 2>/dev/null; then
+                    echo "✓ IT covers DestinationTableHandling.${handling}"
+                else
+                    DEST_MISSING_TABLE_HANDLINGS+=("$handling")
+                fi
+            done
+            if [ ${#DEST_MISSING_TABLE_HANDLINGS[@]} -gt 0 ]; then
+                echo "⚠️  WARNING: Destination IT missing table-handling coverage: ${DEST_MISSING_TABLE_HANDLINGS[*]}"
+                echo "   → First-run behavior should prove FAIL, DROP, and MERGE where supported"
+                WARNINGS=$((WARNINGS + 1))
+            fi
+
+            if grep -R -q --include="*IT.java" "CallbackStatusDto\|CallbackStatus" "$CONNECTOR_DIR/src/test" 2>/dev/null \
+                && grep -R -q --include="*IT.java" "inputRowCount\|successRowCount\|errorRowCount\|getSuccessCount\|getErrorCount\|assertCounts" "$CONNECTOR_DIR/src/test" 2>/dev/null \
+                && grep -R -q --include="*IT.java" "errorPath\|error.csv\|Files.readString" "$CONNECTOR_DIR/src/test" 2>/dev/null; then
+                echo "✓ IT asserts callback row counts and error artifact output"
+            else
+                echo "❌ ERROR: Destination IT must assert callback success/error counts and error artifacts"
+                echo "   → LoadResponse counts alone are not enough; callback status drives orchestration progress"
+                ERRORS=$((ERRORS + 1))
+            fi
+
+            if grep -R -q --include="*IT.java" "SchemaEvolution\|schema evolution\|ALTER TABLE\|add column\|type change\|changed columns" "$CONNECTOR_DIR/src/test" 2>/dev/null; then
+                echo "✓ IT covers schema evolution DDL"
+            else
+                echo "❌ ERROR: Destination IT missing schema evolution coverage"
+                echo "   → Test add-column and type-change paths, not only initial table creation"
+                ERRORS=$((ERRORS + 1))
+            fi
+
+            if grep -R -q --include="*IT.java" "AllTypes\|all-types\|every supported canonical type\|CanonicalType" "$CONNECTOR_DIR/src/test" 2>/dev/null; then
+                echo "✓ IT covers all-type round trip"
+            else
+                echo "❌ ERROR: Destination IT missing all-type round-trip coverage"
+                echo "   → Canonical-to-native mapping must be proven against the live destination"
+                ERRORS=$((ERRORS + 1))
+            fi
+
+            if grep -R -q --include="*IT.java" "BINARY\|VARBYTE\|base64\|binary" "$CONNECTOR_DIR/src/test" 2>/dev/null; then
+                echo "✓ IT covers binary payload handling"
+            else
+                echo "❌ ERROR: Destination IT missing binary handling coverage"
+                echo "   → JSONL/CSV binary handling commonly differs from scalar type handling"
+                ERRORS=$((ERRORS + 1))
+            fi
+
+            if grep -R -q --include="*IT.java" "concurrent\|parallel\|ExecutorService\|CompletableFuture\|CountDownLatch\|cold schema\|first-load\|pg_namespace" "$CONNECTOR_DIR/src/test" 2>/dev/null; then
+                echo "✓ IT covers concurrent cold-schema first-load behavior"
+            else
+                echo "⚠️  WARNING: Destination IT missing concurrent cold-schema first-load coverage"
+                echo "   → Run 2+ first-load objects into a brand-new schema in parallel and assert no duplicate namespace/key race"
+                WARNINGS=$((WARNINGS + 1))
+            fi
+        else
+            echo "⚠️  WARNING: No IT tests found, skipping warehouse maturity matrix"
+            WARNINGS=$((WARNINGS + 1))
+        fi
+
+        if grep -rq "DROP TABLE\|RENAME TO\|ALTER TABLE .* RENAME\|LoadMode.OVERWRITE" "$CONNECTOR_SRC_DIR" --include="*.java" 2>/dev/null; then
+            if grep -rq "PhysicalDesign\|physical design\|DISTKEY\|SORTKEY\|CLUSTER\|PARTITION" "$CONNECTOR_SRC_DIR" --include="*.java" 2>/dev/null; then
+                echo "✓ Drop/recreate paths preserve destination physical design where applicable"
+            else
+                echo "⚠️  WARNING: Drop/recreate paths found without physical-design preservation hooks"
+                echo "   → Preserve user-owned destination hints such as Redshift DISTKEY/SORTKEY or clustering"
+                WARNINGS=$((WARNINGS + 1))
+            fi
+        fi
+
+        if grep -rq "copyQueryId\|queryId\|stageLocation\|statement.*failed\|failed.*statement\|statementIndex" "$CONNECTOR_SRC_DIR" --include="*.java" 2>/dev/null; then
+            echo "✓ Operational logs include stage/query/statement context"
+        else
+            echo "⚠️  WARNING: Missing operational log context for staging/COPY/statement failures"
+            echo "   → Full source-to-destination smoke tests need query id, stage location, statement index, and row counts"
+            WARNINGS=$((WARNINGS + 1))
+        fi
+
+        if $IS_JDBC_CONNECTOR; then
+            if grep -rq "isRetryableException" "$CONNECTOR_SRC_DIR" --include="*.java" 2>/dev/null; then
+                echo "✓ JDBC destination overrides retry classification"
+                if grep -R -q --include="*Test.java" --include="*IT.java" "isRetryableException\|retryable\|not retryable\|Query reached usage limit\|timeout\|cancel" "$CONNECTOR_DIR/src/test" 2>/dev/null; then
+                    echo "✓ Retry classifier has test coverage"
+                else
+                    echo "⚠️  WARNING: Retry classifier override lacks test coverage"
+                    WARNINGS=$((WARNINGS + 1))
+                fi
+            else
+                echo "⚠️  WARNING: JDBC destination does not override retry classification"
+                echo "   → Review broad base JDBC retry SQLState classes and exclude terminal warehouse errors"
+                WARNINGS=$((WARNINGS + 1))
+            fi
+        fi
+
+        echo ""
+    fi
+
+    # ==============================================================================
+    # CHECK 24.6: Local Agent Deployment Packaging
+    # ==============================================================================
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "✓ CHECK 24.6: Local Agent Deployment Packaging"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+    if [ -f "$CONNECTOR_DIR/pom.xml" ]; then
+        if grep -q "deploy-local-connector" "$CONNECTOR_DIR/pom.xml" && grep -q "exec-maven-plugin" "$CONNECTOR_DIR/pom.xml"; then
+            echo "✓ POM deploys built connector to local agent path"
+        else
+            echo "❌ ERROR: POM missing deploy-local-connector exec-maven-plugin execution"
+            echo "   → Local mvn install can build the JAR but leave the agent without the connector"
+            echo "   → Compare with Snowflake/Postgres connector POM deploy-local-connector execution"
+            ERRORS=$((ERRORS + 1))
+        fi
+
+        if grep -q "<scope>provided</scope>" "$CONNECTOR_DIR/pom.xml"; then
+            if grep -q "copy-provided-dependencies\|copy-.*driver" "$CONNECTOR_DIR/pom.xml"; then
+                echo "✓ Provided runtime dependencies are copied for local deployment"
+            else
+                echo "⚠️  WARNING: POM has provided dependencies but no copy-provided-dependencies execution"
+                WARNINGS=$((WARNINGS + 1))
+            fi
+        fi
+    fi
+
+    echo ""
 fi
 
 # ==============================================================================
@@ -1923,6 +2096,9 @@ if [ -f "$PARENT_POM" ]; then
             else
                 echo "⚠️  WARNING: Reactor build may have issues"
                 echo "  → Try: mvn -pl connectors/supaflow-connector-${CONNECTOR_NAME} -am clean compile"
+                if [[ -n "$BUILD_OUTPUT" ]]; then
+                    echo "$BUILD_OUTPUT" | tail -20
+                fi
                 WARNINGS=$((WARNINGS + 1))
             fi
         fi

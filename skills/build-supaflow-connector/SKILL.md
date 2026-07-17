@@ -141,7 +141,7 @@ mvn clean install
 - Phase 0 completed (mandatory references read).
 - Phase 0 gate output shown before first code edit (and repeated after compaction).
 - Correct phase track completed for the connector mode.
-- Verification script passes all applicable final-state checks (`1-15`, `25-27`, and source/destination-specific checks; destinations also run `16-24`).
+- Verification script passes all applicable final-state checks (`1-15`, `25-27`, and source/destination-specific checks; destinations also run `16-24` plus maturity and packaging gates).
 - Verification script re-run after integration tests are written (not just at end of build).
 - Anti-pattern checks reviewed before final handoff.
 - If the task includes connector docs or marketing, `references/CONNECTOR_DOCS_MARKETING.md` was followed and a red-flag sweep was completed before final handoff.

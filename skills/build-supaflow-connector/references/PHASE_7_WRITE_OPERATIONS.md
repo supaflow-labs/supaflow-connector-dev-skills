@@ -21,7 +21,8 @@
 - [Step 4: Implement load()](#step-4-implement-load)
 - [Step 5: Implement executeSqlScript()](#step-5-implement-executesqlscript)
 - [Step 5.5: Propagating Sync Metadata (syncTime, sync_id) Critical](#step-55-propagating-sync-metadata-synctime-sync_id-critical)
-- [Step 6: Build Destination Integration Tests](#step-6-build-destination-integration-tests)
+- [Step 6: Update ConnectorCapabilities](#step-6-update-connectorcapabilities)
+- [Step 7: Warehouse Destination Maturity Gate](#step-7-warehouse-destination-maturity-gate)
 - [Gate Verification](#gate-verification)
 - [Common Mistakes to Avoid](#common-mistakes-to-avoid)
 
@@ -96,7 +97,7 @@ grep -A 100 "public LoadResponse load(" \
   "$PLATFORM_ROOT"/connectors/supaflow-connector-"$REFERENCE_DESTINATION_CONNECTOR"/src/main/java/**/*.java
 ```
 
-If no destination reference connector exists locally, follow this phase strictly and validate with destination checks 16-24 before handoff.
+If no destination reference connector exists locally, follow this phase strictly and validate with all destination checks, including maturity and packaging gates, before handoff.
 
 ### Confirm Understanding
 
@@ -1023,6 +1024,115 @@ public Set<ConnectorCapabilities> getConnectorCapabilities() {
         ConnectorCapabilities.REPLICATION_DESTINATION  // Can be a destination
     );
 }
+```
+
+---
+
+## Step 7: Warehouse Destination Maturity Gate
+
+Passing the structural destination checks is not enough for a warehouse destination. Before handing off for broad source-to-destination smoke tests, prove the behaviors below with unit tests plus live IT where the behavior depends on the warehouse engine.
+
+### Required Live IT Matrix
+
+For cloud warehouse destinations, create live integration tests that cover:
+
+1. **All load modes**
+   - `LoadMode.APPEND`: duplicate primary keys remain duplicated.
+   - `LoadMode.MERGE`: existing primary keys update and new keys insert.
+   - `LoadMode.TRUNCATE_AND_LOAD`: target data is cleared then replaced.
+   - `LoadMode.OVERWRITE`: target table is recreated and loaded.
+
+2. **First-run destination table handling**
+   - `DestinationTableHandling.FAIL`: existing target table fails before destructive changes.
+   - `DestinationTableHandling.DROP`: existing target table is dropped/recreated.
+   - `DestinationTableHandling.MERGE`: existing target table is reused/merged.
+
+3. **Row accounting and error artifacts**
+   - Assert `LoadResponse.successCount` and `LoadResponse.errorCount`.
+   - Assert callback status row counts, not only the returned response.
+   - Force at least one row-level load error in moderate mode and verify the error file contents.
+   - Force the same bad row in strict mode and verify load fails before the final merge.
+
+4. **Schema evolution**
+   - Initial table creation.
+   - Add-column DDL.
+   - Type widening/type-change path.
+   - Dropped-column behavior for load modes that recreate tables.
+   - Zero-row and DDL-only paths.
+
+5. **Type parity**
+   - A live all-types round trip for every supported canonical type.
+   - Explicit binary coverage for JSONL/CSV handling (`BINARY`, Base64, destination binary type).
+   - JSON/native semi-structured coverage where the destination has a native type.
+
+6. **Stage file handling**
+   - Production file names: `success_part_*` with the expected extension for the writer format.
+   - Multiple files.
+   - Compressed files if the connector enables compression.
+   - Empty non-zero load rejection and zero-row load success.
+
+7. **Merge edge cases**
+   - Same-batch duplicate primary keys.
+   - Hard-delete markers if `supportsHardDeletes(true)`.
+   - Windowed replace if the connector exposes replacement windows.
+
+8. **Concurrent cold-schema first load**
+   - Run at least two first-load objects into the same brand-new schema in parallel.
+   - Assert all loads succeed and no duplicate namespace/key error escapes (for example, `pg_namespace` duplicate-key races).
+   - Make schema/table creation idempotent, serialized, or retryable. Do not rely on sequential local smoke tests to catch this.
+
+### Destination Physical Design Preservation
+
+Warehouse users may manually add physical design to optimize load and query performance. Do not infer destination-specific hints from source metadata unless the product explicitly defines those hints. Instead, preserve user-owned design already present on the destination when a load path recreates the table.
+
+Examples:
+
+- Redshift: preserve existing `DISTKEY` and `SORTKEY` on `OVERWRITE`, first-run `DROP`, or other drop-before-rename paths.
+- Warehouses with clustering/partitioning: preserve supported clustering or partition hints when the destination table already has them.
+
+If a preserved key column no longer exists in the new schema, skip that specific key with a warning. Do not fail the sync solely because an optional physical-design hint points at a removed or unsupported column.
+
+### Retry Classification for JDBC Destinations
+
+`BaseJdbcConnector` retries broad SQLState classes for connection and transaction failures. JDBC warehouse destinations must review those defaults and override `isRetryableException(SQLException)` when the destination has terminal errors that should not be retried.
+
+Required examples to consider:
+
+- User cancellation or statement timeout.
+- Warehouse resource/usage limit that disables execution until configuration changes.
+- Permission, object-not-found, or invalid SQL errors.
+- Concurrent creation conflicts during cold schema/table setup. These are transient and should remain retryable or be avoided with serialized/idempotent DDL.
+
+Add tests for the classifier. Do not rely on live smoke tests to discover retry loops.
+
+### Operational Logging
+
+Full smoke matrices are only useful if failures are diagnosable from job logs. Add INFO/WARN logs for:
+
+- Stage summary: target table, file count, bytes, compression, stage location.
+- Load/COPY success: stage table, warehouse query id if available, loaded rows, error rows, file count.
+- Load/COPY failure: SQL state/code/message, stage location, query id if available, error artifact path.
+- Final transaction plan: load mode, table handling, first-run/target-exists flags, statement count.
+- Failing transaction statement: statement index/total and an abbreviated SQL string.
+
+Do not log credentials, passwords, tokens, role external IDs, or raw connection strings.
+
+### Packaging and Product Surface
+
+Before release, compare the new connector with the closest mature connector POM and property surface:
+
+- The connector POM is registered in the parent reactor.
+- The POM has the same local-agent deployment step used by mature Java connectors (`exec-maven-plugin` with `deploy-local-connector`).
+- Provided JDBC drivers are copied to the local deployment `jars/` directory.
+- The connector has a real icon from resources or an embedded SVG.
+- Connection properties have product-quality labels, help text, placeholders, groups, defaults, and sensitive/encrypted flags.
+- Advanced-only settings stay in an advanced group; do not expose inherited read-only tuning controls on a write-only destination.
+- Connector dependency changes regenerate notices with the license-download audit.
+
+Run the verifier after this gate:
+
+```bash
+bash "$SKILL_ROOT/scripts/verify_connector.sh" "$CONNECTOR_NAME" "$PLATFORM_ROOT"
 ```
 
 ---
