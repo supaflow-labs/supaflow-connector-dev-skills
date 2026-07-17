@@ -4,7 +4,7 @@
 
 **Time Estimate**: 60-90 minutes
 
-**Prerequisite**: Phase 5 completed and all 15 verification checks pass.
+**Prerequisite**: Phase 5 completed and all applicable source/shared verification checks pass.
 
 ---
 
@@ -41,7 +41,7 @@ source export.env
 ## Step 1: Create IT Test Class Structure
 
 ```java
-package io.supaflow.connectors.{name};
+package io.supaflow.connector.{name};
 
 import io.supaflow.connector.sdk.model.ReadRequest;
 import io.supaflow.connector.sdk.model.ReadResponse;
@@ -229,13 +229,13 @@ public class {Name}ConnectorIT {
                     .as("Original data type required for " + obj.getName() + "." + field.getName())
                     .isNotNull();
 
-                if (field.isPrimaryKey()) {
+                if (Boolean.TRUE.equals(field.getSourcePrimaryKey())) {
                     hasPrimaryKey = true;
                 }
             }
 
             assertThat(hasPrimaryKey)
-                .as("Object should have primary key: " + obj.getName())
+                .as("Object should have source primary key: " + obj.getName())
                 .isTrue();
         }
     }
@@ -647,6 +647,24 @@ it proves completeness, not exclusion.
 
 ---
 
+### Destination Connector Handoff Rule
+
+For connectors with `REPLICATION_DESTINATION`, source-style IT is not enough. Complete Phase 7's warehouse or activation destination test matrix before declaring the connector ready for broad source-to-destination smoke tests.
+
+For warehouse destinations, the minimum live IT evidence is:
+
+- All load modes: `APPEND`, `MERGE`, `OVERWRITE`, and `TRUNCATE_AND_LOAD`.
+- First-run table handling: `FAIL`, `DROP`, and `MERGE` where supported.
+- Callback row counts, `LoadResponse` counts, and error artifact contents.
+- Schema evolution DDL beyond column addition, including type changes.
+- All-type and binary round trips for the writer format used by the destination.
+- Stage file discovery using production `success_part_*` names.
+- Any destination physical-design preservation required by drop/recreate paths.
+
+Keep credentials in `export.env` and use `@EnabledIfEnvironmentVariable` or assumptions so CI without live credentials skips cleanly.
+
+---
+
 ## Step 2: Additional Test Cases (Recommended)
 
 ```java
@@ -754,20 +772,20 @@ private ObjectMetadata findLargeObject(List<ObjectMetadata> objects) {
 ## Step 3: Run Integration Tests
 
 ```bash
-# Navigate to connector directory
-cd connectors/supaflow-connector-{name}
+# Run from the platform root so reactor dependencies are available
+cd <platform-root>
 
-# Load credentials
+# Load credentials if your repo/task provides an env file
 source export.env
 
 # Run all IT tests
-mvn test -Dtest={Name}ConnectorIT
+mvn -pl connectors/supaflow-connector-{name} -am test -Dtest={Name}ConnectorIT
 
 # Run specific test
-mvn test -Dtest={Name}ConnectorIT#testConnectionSuccess
+mvn -pl connectors/supaflow-connector-{name} -am test -Dtest={Name}ConnectorIT#testConnectionSuccess
 
 # Run with verbose output
-mvn test -Dtest={Name}ConnectorIT -X
+mvn -pl connectors/supaflow-connector-{name} -am test -Dtest={Name}ConnectorIT -X
 ```
 
 ---

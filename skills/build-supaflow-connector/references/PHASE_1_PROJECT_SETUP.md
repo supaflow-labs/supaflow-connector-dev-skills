@@ -40,134 +40,69 @@ connectors/supaflow-connector-{name}/
 └── src/
     ├── main/
     │   ├── java/
-    │   │   └── io/supaflow/connectors/{name}/
+    │   │   └── io/supaflow/connector/{name}/
     │   │       └── {Name}Connector.java
     │   └── resources/
     │       └── version.properties
     └── test/
         └── java/
-            └── io/supaflow/connectors/{name}/
+            └── io/supaflow/connector/{name}/
                 └── {Name}ConnectorIT.java
 ```
 
 **Naming Convention**:
 - Directory: `supaflow-connector-{name}` (lowercase, hyphenated)
-- Package: `io.supaflow.connectors.{name}` (lowercase)
+- Package: `io.supaflow.connector.{name}` (lowercase, singular `connector`)
 - Class: `{Name}Connector` (PascalCase)
-- Example: `sfmc` → `supaflow-connector-sfmc`, `io.supaflow.connectors.sfmc`, `SfmcConnector`
+- Example: `sfmc` → `supaflow-connector-sfmc`, `io.supaflow.connector.sfmc`, `SfmcConnector`
 
 ---
 
 ## Step 2: Create pom.xml
 
-```xml
-<?xml version="1.0" encoding="UTF-8"?>
-<project xmlns="http://maven.apache.org/POM/4.0.0"
-         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0
-                             http://maven.apache.org/xsd/maven-4.0.0.xsd">
-    <modelVersion>4.0.0</modelVersion>
+Do not hand-write a stripped POM from memory. Copy a mature connector POM from the current platform repo, then edit the identity fields and dependencies.
 
-    <!-- Parent POM - MUST match existing connectors -->
-    <parent>
-        <groupId>io.supaflow</groupId>
-        <artifactId>supaflow-platform</artifactId>
-        <version>{platform-version}</version>
-        <relativePath>../../pom.xml</relativePath>
-    </parent>
+Recommended source reference for API connectors:
 
-    <artifactId>supaflow-connector-{name}</artifactId>
-    <packaging>jar</packaging>
-    <name>Supaflow Connector - {Display Name}</name>
-
-    <properties>
-        <maven.compiler.source>17</maven.compiler.source>
-        <maven.compiler.target>17</maven.compiler.target>
-        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-    </properties>
-
-    <dependencies>
-        <!-- Connector SDK - REQUIRED -->
-        <dependency>
-            <groupId>io.supaflow</groupId>
-            <artifactId>supaflow-connector-sdk</artifactId>
-        </dependency>
-
-        <!-- HTTP Client - for REST APIs -->
-        <dependency>
-            <groupId>com.squareup.okhttp3</groupId>
-            <artifactId>okhttp</artifactId>
-        </dependency>
-
-        <!-- JSON Processing -->
-        <dependency>
-            <groupId>com.fasterxml.jackson.core</groupId>
-            <artifactId>jackson-databind</artifactId>
-        </dependency>
-
-        <!-- Logging -->
-        <dependency>
-            <groupId>org.slf4j</groupId>
-            <artifactId>slf4j-api</artifactId>
-        </dependency>
-
-        <!-- Testing -->
-        <dependency>
-            <groupId>org.junit.jupiter</groupId>
-            <artifactId>junit-jupiter</artifactId>
-            <scope>test</scope>
-        </dependency>
-        <dependency>
-            <groupId>org.assertj</groupId>
-            <artifactId>assertj-core</artifactId>
-            <scope>test</scope>
-        </dependency>
-    </dependencies>
-
-    <build>
-        <plugins>
-            <!-- Shade plugin - creates fat JAR for deployment -->
-            <plugin>
-                <groupId>org.apache.maven.plugins</groupId>
-                <artifactId>maven-shade-plugin</artifactId>
-                <version>3.5.1</version>
-                <executions>
-                    <execution>
-                        <phase>package</phase>
-                        <goals>
-                            <goal>shade</goal>
-                        </goals>
-                        <configuration>
-                            <transformers>
-                                <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
-                                    <mainClass>io.supaflow.connectors.{name}.{Name}Connector</mainClass>
-                                </transformer>
-                            </transformers>
-                            <filters>
-                                <filter>
-                                    <artifact>*:*</artifact>
-                                    <excludes>
-                                        <exclude>META-INF/*.SF</exclude>
-                                        <exclude>META-INF/*.DSA</exclude>
-                                        <exclude>META-INF/*.RSA</exclude>
-                                    </excludes>
-                                </filter>
-                            </filters>
-                        </configuration>
-                    </execution>
-                </executions>
-            </plugin>
-        </plugins>
-    </build>
-</project>
+```bash
+cp connectors/supaflow-connector-salesforce-marketing-cloud/pom.xml \
+   connectors/supaflow-connector-{name}/pom.xml
 ```
 
-Set `{platform-version}` to the same parent version used by existing connectors in your platform repo.
+Then update:
+
+```xml
+<artifactId>supaflow-connector-{name}</artifactId>
+<name>supaflow-connector-{name}</name>
+<description>Supaflow {Display Name} connector</description>
+```
+
+Keep the current connector deployment plumbing from the reference POM:
+
+- `libs.output.dir` and `groupId.path`
+- filtered `version.properties` resources
+- `maven-clean-plugin`, `build-helper-maven-plugin`, `maven-enforcer-plugin`
+- `maven-shade-plugin` with agent-provided dependency excludes
+- dependency/antrun/exec plugin copy steps for `supaflow-connector-libs` and local agent deployment
+
+Set dependency scope to match the reference connector. For example, OkHttp is usually `provided` because the agent provides it at runtime.
 
 **Critical Points**:
 - Parent POM must be `supaflow-platform`
 - `supaflow-connector-sdk` provides core types and SDK helpers
-- Shade plugin is REQUIRED for deployment
+- Shade/deploy plumbing is REQUIRED for connector deployment; do not replace it with a minimal shade-only POM unless the current repo's reference connector has also changed.
+
+## Step 2.5: Register Connector in Parent POM
+
+**File**: `<platform-root>/pom.xml`
+
+Add the module in the parent reactor:
+
+```xml
+<module>connectors/supaflow-connector-{name}</module>
+```
+
+Without this registration, `mvn -pl connectors/supaflow-connector-{name} -am ...` and full platform builds will skip the connector.
 
 ---
 
@@ -221,7 +156,7 @@ Thumbs.db
 Create the minimum connector class that compiles:
 
 ```java
-package io.supaflow.connectors.{name};
+package io.supaflow.connector.{name};
 
 import io.supaflow.connector.sdk.SupaflowConnector;
 import io.supaflow.connector.sdk.metadata.ConnectionProperty;
@@ -266,7 +201,7 @@ public class {Name}Connector implements SupaflowConnector {
     }
 
     @Override
-    public String getName() {
+    public String getName() throws ConnectorException {
         // TODO: Phase 2 - return display name (e.g., "Salesforce Marketing Cloud")
         throw new UnsupportedOperationException("Phase 2: Not yet implemented");
     }
@@ -406,7 +341,7 @@ public class {Name}Connector implements SupaflowConnector {
     }
 
     @Override
-    public void identifyCursorFields(ObjectMetadata objectMetadata) {
+    public void identifyCursorFields(ObjectMetadata objectMetadata) throws ConnectorException {
         // TODO: Phase 5 - identify best cursor fields for incremental sync
         throw new UnsupportedOperationException("Phase 5: Not yet implemented");
     }
@@ -495,10 +430,10 @@ public class {Name}Connector implements SupaflowConnector {
 
 ## Step 6: Create Empty IT Test Class
 
-Location: `src/test/java/io/supaflow/connectors/{name}/{Name}ConnectorIT.java`
+Location: `src/test/java/io/supaflow/connector/{name}/{Name}ConnectorIT.java`
 
 ```java
-package io.supaflow.connectors.{name};
+package io.supaflow.connector.{name};
 
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -543,16 +478,15 @@ public class {Name}ConnectorIT {
 Run these commands and verify they pass:
 
 ```bash
-# 1. Navigate to connector directory
-cd connectors/supaflow-connector-{name}
+# 1. Compile from the platform root with reactor dependencies
+cd <platform-root>
+mvn -pl connectors/supaflow-connector-{name} -am compile
 
-# 2. Compile the project - MUST succeed
-mvn compile
-
-# 3. Run verification script (checks 9 and 14)
-cd ../..
+# 2. Run verification script (Phase 1 checks: 9, 14, 25)
 bash <skill-root>/scripts/verify_connector.sh {name} <platform-root>
 ```
+
+The verifier is a final-state script and may exit nonzero during Phase 1 because read/auth/schema/cancellation checks are not implemented yet. For this phase, gate only on CHECK 9, CHECK 14, and CHECK 25 being clean.
 
 ### Manual Checklist
 
@@ -561,20 +495,21 @@ Before proceeding to Phase 2, confirm ALL of the following:
 | Check | Command/Action | Expected Result |
 |-------|----------------|-----------------|
 | ☐ Directory exists | `ls connectors/supaflow-connector-{name}` | Directory found |
-| ☐ pom.xml valid | `mvn validate` | BUILD SUCCESS |
-| ☐ Project compiles | `mvn compile` | BUILD SUCCESS |
+| ☐ pom.xml valid | `mvn -pl connectors/supaflow-connector-{name} -am validate` | BUILD SUCCESS |
+| ☐ Project compiles | `mvn -pl connectors/supaflow-connector-{name} -am compile` | BUILD SUCCESS |
 | ☐ version.properties exists | `cat src/main/resources/version.properties` | Shows version |
 | ☐ .gitignore exists | `cat .gitignore` | Shows target/ excluded |
 | ☐ target/ not in git | `git status --ignored` | target/ is ignored |
 | ☐ CHECK 9 passes | `verify_connector.sh {name}` | pom.xml + shade plugin ✓ |
 | ☐ CHECK 14 passes | `verify_connector.sh {name}` | No target/ in git ✓ |
+| ☐ CHECK 25 passes | `verify_connector.sh {name}` | Registered in parent pom.xml ✓ |
 
 ### Show Your Work
 
 Before proceeding to Phase 2, show:
 
-1. Output of `mvn compile`
-2. Output of `bash <skill-root>/scripts/verify_connector.sh {name} <platform-root>` (at least CHECKs 9, 14)
+1. Output of `mvn -pl connectors/supaflow-connector-{name} -am compile`
+2. Output of `bash <skill-root>/scripts/verify_connector.sh {name} <platform-root>` (at least CHECKs 9, 14, 25)
 3. Contents of your connector class (showing shell structure)
 
 ---

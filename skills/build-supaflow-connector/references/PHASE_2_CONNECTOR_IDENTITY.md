@@ -69,7 +69,7 @@ The display name shown in the UI:
 
 ```java
 @Override
-public String getName() {
+public String getName() throws ConnectorException {
     return "Salesforce Marketing Cloud";  // Human-readable name
 }
 ```
@@ -124,6 +124,8 @@ public String getIcon() {
 
 **Best Practice**: Copy the icon to `src/main/resources/icons/` so it's bundled with the JAR.
 
+**Release Gate**: `getIcon()` must return a real non-empty SVG payload. Do not leave the icon empty, placeholder-only, or dependent on a local development path. Missing icons can break connector deployment and leave the UI with unusable connector cards.
+
 ---
 
 ## Step 4: Define Connection Properties
@@ -174,8 +176,8 @@ public String subdomain;
 | Attribute | Type | Description |
 |-----------|------|-------------|
 | `displayOrder` | int | Order in UI (0, 1, 2...) |
-| `label` | String | Field label in UI |
-| `description` | String | Help text / tooltip |
+| `label` | String | Required field label in UI. Must contain only letters, digits, and spaces (`[a-z0-9 ]`); no punctuation or parentheses. |
+| `description` | String | Required help text / tooltip. The SDK annotation has no default, so omitting this will not compile. |
 | `type` | PropertyType | STRING, NUMERIC, BOOLEAN, ENUM, OAUTH_CONFIG |
 | `required` | boolean | Is this field required? |
 | `encrypted` | boolean | Store encrypted in database |
@@ -187,6 +189,25 @@ public String subdomain;
 | `enumValues` | String[] | For PropertyType.ENUM |
 | `relatedPropertyNameAndValue` | String[] | Conditional visibility |
 
+### Product-Quality Property Surface
+
+Before considering Phase 2 complete, compare the property surface with the closest mature connector in the same category. For example, compare a new warehouse destination with Snowflake/Postgres and compare S3-backed staging fields with S3 Data Lake.
+
+Required review:
+
+- Labels use user-facing product language, not internal field names.
+- Descriptions explain why the field is needed and where to find the value.
+- Placeholders match the label and do not contain placeholder jargon.
+- Required, encrypted, password, and sensitive flags are correct for secrets.
+- Fields are grouped into user-facing sections such as `Connection`, `S3 Staging`, and `Advanced Settings`.
+- Advanced-only fields stay out of the primary connection section.
+- Source/read tuning controls are not exposed on write-only destinations unless the destination actually uses them.
+- Defaults match the common happy path and do not weaken security.
+
+Do not treat property annotations as a compile-only task. The connector card and setup form are part of the connector contract.
+
+**Label rule**: `ConnectionPropertyUtil` rejects labels with punctuation. Use only letters, digits, and spaces; write `"Account ID MID"`, not `"Account ID (MID)"`.
+
 ### Conditional Properties with relatedPropertyNameAndValue
 
 Show a property only when another property has a specific value:
@@ -195,6 +216,7 @@ Show a property only when another property has a specific value:
 @Property(
     displayOrder = 0,
     label = "Authentication Method",
+    description = "Authentication method to use for this connector",
     type = PropertyType.ENUM,
     enumValues = {"oauth", "api_key"},
     required = true,
@@ -206,6 +228,7 @@ public String authMethod = "oauth";
 @Property(
     displayOrder = 1,
     label = "API Key",
+    description = "API key used to authenticate requests",
     type = PropertyType.STRING,
     required = false,  // Not globally required
     encrypted = true,
@@ -220,6 +243,7 @@ public String apiKey;
 @Property(
     displayOrder = 2,
     label = "OAuth Configuration",
+    description = "OAuth configuration consumed by the frontend",
     type = PropertyType.OAUTH_CONFIG,
     required = false,
     hidden = true,  // Config is read by frontend, not shown as field
@@ -253,6 +277,7 @@ public static OAuthConfig getMyConnectorOAuthConfig() {
 @Property(
     displayOrder = 100,
     label = "Access Token",
+    description = "OAuth access token populated by the OAuth flow",
     type = PropertyType.STRING,
     hidden = true,
     encrypted = true,
@@ -264,6 +289,7 @@ public String accessToken;
 @Property(
     displayOrder = 101,
     label = "Refresh Token",
+    description = "OAuth refresh token populated by the OAuth flow",
     type = PropertyType.STRING,
     hidden = true,
     encrypted = true,
@@ -275,6 +301,7 @@ public String refreshToken;
 @Property(
     displayOrder = 102,
     label = "Token Expiry",
+    description = "Expiration timestamp for the OAuth access token",
     type = PropertyType.STRING,
     hidden = true,
     propertyGroup = "Internal"
@@ -315,9 +342,10 @@ public Set<ConnectorCapabilities> getConnectorCapabilities() {
 
 ---
 
-## Step 6: Implement getCapabilitiesConfig() (Optional but Recommended)
+## Step 6: Implement getCapabilitiesConfig() (Required)
 
 Define detailed capabilities for the UI using ConnectorCapabilitiesConfigBuilder.
+New connectors must override this method and choose the connector-type preset that matches the implementation. The interface has a default, but the default is not specific enough for production metadata.
 
 ### Capability Ownership (Source vs Destination vs Both)
 
@@ -382,7 +410,23 @@ public ConnectorCapabilitiesConfig getCapabilitiesConfig() {
 }
 ```
 
-**For Warehouse Destinations:**
+**For Direct Database Destinations (PostgreSQL, SQL Server, MySQL, etc.):**
+```java
+@Override
+public ConnectorCapabilitiesConfig getCapabilitiesConfig() {
+    return ConnectorCapabilitiesConfigBuilder.builder()
+        .asTraditionalDatabase()
+        .requiresStaging(false)
+        .requiresExplicitLoadStep(true)
+        .canAutoCreateSchema(true)
+        .supportsHardDeletes(true)
+        .build();
+}
+```
+
+Use this pattern when `stage()` returns `StageResponse.noOp(...)` and `load()` reads local CSV files from `LoadRequest.getLocalDataPath()`.
+
+**For Staged Warehouse Destinations:**
 ```java
 @Override
 public ConnectorCapabilitiesConfig getCapabilitiesConfig() {
@@ -441,7 +485,7 @@ public ConnectorCapabilitiesConfig getCapabilitiesConfig() {
 Replace the Phase 1 shell methods with real implementations:
 
 ```java
-package io.supaflow.connectors.sfmc;
+package io.supaflow.connector.sfmc;
 
 import io.supaflow.connector.sdk.SupaflowConnector;
 import io.supaflow.connector.sdk.annotation.Property;
@@ -485,7 +529,7 @@ public class SfmcConnector implements SupaflowConnector {
               propertyGroup = "Authentication")
     public String subdomain;
 
-    @Property(displayOrder = 3, label = "Account ID (MID)",
+    @Property(displayOrder = 3, label = "Account ID MID",
               description = "Marketing Cloud Account ID",
               type = PropertyType.STRING, required = true,
               propertyGroup = "Authentication")
@@ -499,12 +543,14 @@ public class SfmcConnector implements SupaflowConnector {
 
     // Hidden internal properties
     @Property(displayOrder = 100, label = "Access Token",
+              description = "OAuth access token populated by the OAuth flow",
               type = PropertyType.STRING, hidden = true,
               encrypted = true, sensitive = true,
               propertyGroup = "Internal")
     public String accessToken;
 
     @Property(displayOrder = 101, label = "Token Expiry",
+              description = "Expiration timestamp for the OAuth access token",
               type = PropertyType.STRING, hidden = true,
               propertyGroup = "Internal")
     public String tokenExpiresAt;
@@ -519,7 +565,7 @@ public class SfmcConnector implements SupaflowConnector {
     }
 
     @Override
-    public String getName() {
+    public String getName() throws ConnectorException {
         return "Salesforce Marketing Cloud";
     }
 
@@ -532,12 +578,12 @@ public class SfmcConnector implements SupaflowConnector {
     public String getIcon() {
         try (InputStream is = getClass().getResourceAsStream("/icons/sfmc.svg")) {
             if (is == null) {
-                return null;
+                return "";
             }
             return Base64.getEncoder().encodeToString(is.readAllBytes());
         } catch (IOException e) {
             log.warn("Failed to load icon", e);
-            return null;
+            return "";
         }
     }
 
@@ -650,12 +696,12 @@ public class SfmcConnector implements SupaflowConnector {
     }
 
     @Override
-    public String getDefaultCatalog() {
+    public String getDefaultCatalog() throws ConnectorException {
         return null;
     }
 
     @Override
-    public String getDefaultSchema() {
+    public String getDefaultSchema() throws ConnectorException {
         return null;
     }
 
@@ -680,66 +726,7 @@ public class SfmcConnector implements SupaflowConnector {
 
 ---
 
-## Step 8: Register Connector in Parent POM (CRITICAL)
-
-**CRITICAL**: The connector must be registered in the parent reactor for platform builds to include it.
-
-Without this registration:
-- ❌ `mvn clean install` from platform root will skip this connector
-- ❌ Agent deployments won't include this connector
-- ❌ Production builds will be missing this connector
-
-### Edit Parent POM
-
-**File**: `<platform-root>/pom.xml`
-
-**Add in `<modules>` section** (around line 27-33):
-
-```xml
-<modules>
-    ...
-    <module>connectors/supaflow-connector-sdk</module>
-    <module>connectors/supaflow-connector-jdbc-common</module>
-    <module>connectors/supaflow-connector-postgres</module>
-    <module>connectors/supaflow-connector-snowflake</module>
-    <module>connectors/supaflow-connector-{name}</module>  <!-- ADD YOUR CONNECTOR -->
-    <module>connectors/supaflow-connector-salesforce</module>
-    ...
-</modules>
-```
-
-**Placement Guidelines:**
-- Group logically by type (databases → warehouses → CRMs → marketing)
-- Or maintain alphabetical order within type groups
-- Example ordering: postgres → snowflake → s3 → salesforce (databases → warehouses → CRMs)
-
-### Verify Registration
-
-```bash
-# Build from platform root with dependencies
-cd <platform-root>
-mvn clean compile -pl connectors/supaflow-connector-{name} -am
-
-# You should see in reactor summary:
-# [INFO] supaflow-connector-{name} .................... SUCCESS [  X.XXX s]
-# [INFO] BUILD SUCCESS
-```
-
-**Common Mistake:**
-
-Building directly in connector directory works even without parent POM registration:
-
-```bash
-# ⚠️  This succeeds even if NOT registered in parent POM
-cd connectors/supaflow-connector-{name}
-mvn clean install
-```
-
-This is why the issue goes undetected until deployment! Always verify with `-pl` flag from platform root.
-
----
-
-## Step 9: Dependency Version Management
+## Step 8: Dependency Version Management
 
 ### Rule: Use Parent POM Versions When Available
 
@@ -759,7 +746,7 @@ grep -A3 "artifactId>commons-codec" ../../pom.xml
 **Common utilities** (NEVER specify version in connector POM):
 
 ```xml
-<!-- ✅ CORRECT: No version, uses parent -->
+<!-- No version, uses parent -->
 <dependency>
     <groupId>commons-codec</groupId>
     <artifactId>commons-codec</artifactId>
@@ -778,7 +765,7 @@ grep -A3 "artifactId>commons-codec" ../../pom.xml
     <!-- Version managed by parent POM: 2.14.0 -->
 </dependency>
 
-<!-- ❌ WRONG: Hardcoded version when parent defines it -->
+<!-- WRONG: Hardcoded version when parent defines it -->
 <dependency>
     <groupId>commons-codec</groupId>
     <artifactId>commons-codec</artifactId>
@@ -833,7 +820,7 @@ grep -A3 "artifactId>commons-codec" ../../pom.xml
 <dependency>
     <groupId>ch.qos.logback</groupId>
     <artifactId>logback-classic</artifactId>
-    <version>1.5.13</version>  <!-- ✅ OK: Test scope, consistent across connectors -->
+    <version>1.5.13</version>  <!-- OK: Test scope, consistent across connectors -->
     <scope>test</scope>
 </dependency>
 ```
@@ -859,7 +846,7 @@ grep -A3 "artifactId>commons-codec" ../../pom.xml
 </properties>
 
 <dependencies>
-    <!-- ✅ CORRECT: Connector-specific dependency -->
+    <!-- Connector-specific dependency -->
     <dependency>
         <groupId>software.amazon.awssdk</groupId>
         <artifactId>s3</artifactId>
@@ -900,12 +887,11 @@ mvn dependency:tree -pl connectors/supaflow-connector-{name}
 ### Automated Checks
 
 ```bash
-# 1. Compile the project
-cd connectors/supaflow-connector-{name}
-mvn compile
+# 1. Compile from the platform root with reactor dependencies
+cd <platform-root>
+mvn -pl connectors/supaflow-connector-{name} -am compile
 
 # 2. Run verification script
-cd ../..
 bash <skill-root>/scripts/verify_connector.sh {name} <platform-root>
 ```
 
@@ -913,11 +899,12 @@ bash <skill-root>/scripts/verify_connector.sh {name} <platform-root>
 
 | Check | Expected Result |
 |-------|-----------------|
+| CHECK 4 | ✓ Version metadata methods implemented |
 | CHECK 5 | ✓ Connector capabilities defined |
 | CHECK 6 | ✓ Property annotations found |
-| CHECK 9 | ✓ pom.xml and shade plugin |
 | CHECK 11 | ✓ getType/getName conventions |
-| CHECK 14 | ✓ No target/ in git |
+| CHECK 26 | ✓ Dependency versions are parent-managed |
+| Previous setup checks | Still passing |
 
 ### Manual Checklist
 
@@ -934,8 +921,8 @@ Before proceeding to Phase 3, confirm ALL of the following:
 | ☐ Properties have proper `displayOrder` | Code review |
 | ☐ Properties grouped logically with `propertyGroup` | Code review |
 | ☐ Capabilities match what you WILL implement | Review against plan |
-| ☐ Connector registered in parent pom.xml | `grep "supaflow-connector-{name}" ../../pom.xml` |
-| ☐ Reactor build includes connector | `mvn compile -pl connectors/supaflow-connector-{name} -am` |
+| ☐ Connector registered in parent pom.xml | Already completed in Phase 1 |
+| ☐ Reactor build includes connector | `mvn -pl connectors/supaflow-connector-{name} -am compile` |
 | ☐ No hardcoded versions for parent-managed deps | Review dependencies section |
 | ☐ CHECK 5, 6, 11, 25, 26 pass | Verification script |
 
@@ -943,7 +930,7 @@ Before proceeding to Phase 3, confirm ALL of the following:
 
 Before proceeding to Phase 3, show:
 
-1. Output of `mvn compile`
+1. Output of `mvn -pl connectors/supaflow-connector-{name} -am compile`
 2. Output of `bash <skill-root>/scripts/verify_connector.sh {name} <platform-root>` (CHECKs 5, 6, 11)
 3. List of properties defined with their types
 4. Capabilities declared
@@ -956,7 +943,7 @@ Before proceeding to Phase 3, show:
 |---------|----------------|------------------|
 | Not registering in parent pom.xml | Connector skipped in platform builds | Add `<module>` entry in parent pom.xml |
 | Hardcoding dependency versions | Version conflicts, missed updates | Omit version for parent-managed deps |
-| Building only in connector directory | Misses parent POM issues | Verify with `mvn compile -pl ... -am` from root |
+| Building only in connector directory | Misses parent POM issues | Verify with `mvn -pl ... -am compile` from root |
 | getType() not SCREAMING_SNAKE_CASE | Convention violation | Use "SFMC" not "sfmc" or "Sfmc" |
 | Declaring capabilities you don't implement | Executor expects them to work | Only declare what you'll build |
 | Missing `encrypted` on secrets | Credentials stored in plaintext | Always encrypt sensitive data |

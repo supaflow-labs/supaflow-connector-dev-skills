@@ -6,13 +6,13 @@
 
 **Prerequisite**: Phases 1-6 completed. This phase is for API-based destinations like Salesforce, HubSpot, Marketo where schema is fixed.
 
-**Note**: This is different from Phase 7 (Warehouse Destinations) which creates tables/schemas. Activation connectors write to pre-existing objects via API.
+**Note**: This is different from Phase 7 (structured database/warehouse/file destinations) which creates or manages destination tables/files. Activation connectors write to pre-existing objects via API.
 
 ---
 
-## Activation vs Warehouse Destinations
+## Activation vs Structured Destinations
 
-| Aspect | Warehouse (Phase 7) | Activation (Phase 8) |
+| Aspect | Structured Destination (Phase 7) | Activation (Phase 8) |
 |--------|---------------------|----------------------|
 | **Examples** | Snowflake, BigQuery, Postgres | Salesforce, HubSpot, Marketo |
 | **DDL** | Creates tables/schemas | No DDL - fixed schema |
@@ -69,7 +69,7 @@ grep -A 50 "upsertFromLocalFiles" \
   "$PLATFORM_ROOT"/connectors/supaflow-connector-"$REFERENCE_ACTIVATION_CONNECTOR"/src/main/java/**/*.java
 ```
 
-If no activation reference connector exists locally, keep this phase as the source of truth and enforce checks 16-24 plus activation metadata validation in tests.
+If no activation reference connector exists locally, keep this phase as the source of truth and enforce all destination checks plus activation metadata validation in tests.
 
 ### Confirm Understanding
 
@@ -79,7 +79,7 @@ Before proceeding, you MUST be able to answer:
 2. What is `activation_target_field` on FieldMetadata?
 3. What are `selected_merge_keys` used for?
 4. What is `activation_behaviour` and what values can it have?
-5. How does `mapToTargetObject()` differ for activations vs warehouses?
+5. How does `mapToTargetObject()` differ for activations vs structured destinations?
 6. How are error/success records tracked per-record?
 
 ---
@@ -264,7 +264,7 @@ private Map<String, Object> activationLookup;
 
 ## Step 1: Implement mapToTargetObject() for Activations
 
-For activation connectors, `mapToTargetObject()` is a **pass-through** that preserves activation metadata. Unlike warehouse connectors, we don't transform the schema.
+For activation connectors, `mapToTargetObject()` is a **pass-through** that preserves activation metadata. Unlike structured database/warehouse/file destinations, we don't transform the schema.
 
 ```java
 @Override

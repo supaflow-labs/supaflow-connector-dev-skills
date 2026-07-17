@@ -23,10 +23,10 @@ Works with **Claude Code**, **OpenAI Codex**, and any agent that supports skill/
 ## What this does
 
 **Does**
-- Walk an AI coding agent through building Java or Python/dlt Supaflow connectors (source, warehouse destination, or activation target)
+- Walk an AI coding agent through building Java or Python/dlt Supaflow connectors (source, direct database destination, warehouse/file destination, or activation target)
 - Enforce phased gates -- the agent cannot skip ahead until the current phase passes verification
 - Catch 20+ known anti-patterns before they reach production (e.g., calling `processor.close()`, missing `originalDataType`, using raw `maxCursorSeen` without a compatible boundary strategy)
-- Run automated verification (24 checks for source + destination connectors)
+- Run automated verification across all applicable checks (`1-27`, plus `3.5`)
 
 **Does not**
 - Require any specific IDE or editor
@@ -53,7 +53,7 @@ The skill will ask you to provide the following inputs. Here's how to fill them 
 |-------|----------------|----------|
 | `platform_root` | Absolute path to your `supaflow-platform` clone | `/home/user/supaflow-platform` |
 | `connector_name` | Short lowercase name used as the module suffix. Becomes `supaflow-connector-<name>` | `stripe`, `sqlserver`, `bigquery` |
-| `connector_mode` | What the connector does. Pick one | `source`, `destination-warehouse`, `destination-activation`, `hybrid` |
+| `connector_mode` | What the connector does. Pick one | `source`, `destination-database`, `destination-warehouse`, `destination-activation`, `hybrid` |
 | `implementation_track` | Connector framework/layout | `python-dlt`, `java-api`, `java-jdbc` |
 | `auth_type` | How the source/destination authenticates. Use `custom` if it doesn't fit a standard pattern | `API key`, `OAuth client credentials`, `OAuth auth code`, `custom` |
 | `api_surface` | Describe the API: what objects exist, how pagination works, rate limits, and which fields support incremental sync. For JDBC connectors, mention the driver and reference the closest existing connector | `JDBC-based (like postgres); objects=tables,views; cursor_fields=datetime columns` |
@@ -97,6 +97,7 @@ in the Codex-specific guide. Do not use a symlink for Codex; some skill
 registries do not index symlinked directories. `SKILL.md` uses portable
 frontmatter containing only `name` and `description`, and `quick_validate.py`
 must pass.
+If an agent platform cannot invoke the skill through its skill tool, fall back to reading `skills/build-supaflow-connector/SKILL.md` directly and follow the referenced docs/scripts.
 
 ## How it works
 
@@ -108,22 +109,23 @@ prerequisite reading, and a gate check that must pass before proceeding.
 | Connector Mode | Phases |
 |---------------|--------|
 | Source | 1 &rarr; 2 &rarr; 3 &rarr; 4 &rarr; 5 &rarr; 6 |
-| Warehouse Destination | 1 &rarr; 2 &rarr; 3 &rarr; 4 &rarr; 7 + destination tests |
+| Direct Database Destination | 1 &rarr; 2 &rarr; 3 &rarr; 4 &rarr; 7 + destination tests |
+| Warehouse/File Destination | 1 &rarr; 2 &rarr; 3 &rarr; 4 &rarr; 7 + destination tests |
 | Activation Destination | 1 &rarr; 2 &rarr; 3 &rarr; 4 &rarr; 8 + destination tests |
-| Hybrid | Both 7 and 8 |
+| Hybrid | Source track plus the applicable destination track |
 | Python/dlt Source | `PYTHON_DLT_CONNECTOR_GUIDE.md` (replaces Java phases 1-6) |
 
 ### Phases
 
 | Phase | Purpose | Gate Checks |
 |-------|---------|-------------|
-| 1 | Project structure, pom.xml, shell class | 9, 14 |
-| 2 | Connector identity, properties, capabilities | 5, 6, 11 |
+| 1 | Project structure, pom.xml, shell class | 9, 14, 25 |
+| 2 | Connector identity, properties, capabilities | 4, 5, 6, 11, 26 |
 | 3 | Connection, auth, token management | 7, 10 |
-| 4 | Schema discovery, ObjectMetadata, FieldMetadata | 4, 12, 13 |
+| 4 | Schema discovery, ObjectMetadata, FieldMetadata | 3.5, 12, 13 |
 | 5 | Read operations, SyncState, CutoffTime pattern | 1, 2, 3, 8 |
 | 6 | Integration testing | 15 |
-| 7 | Warehouse destinations: stage(), load() | 16-24 |
+| 7 | Structured destinations: direct database, warehouse/file stage(), load() | 16-24, 27 |
 | 8 | Activation targets: activation mappings | 16-24 |
 
 ### Hard Guardrails
@@ -148,7 +150,7 @@ These rules are enforced at every phase:
 |-------|-------------|---------|
 | `platform_root` | Absolute path to Supaflow platform repo | `/home/user/supaflow-platform` |
 | `connector_name` | Module suffix | `stripe` |
-| `connector_mode` | Connector type | `source`, `destination-warehouse`, `destination-activation`, `hybrid` |
+| `connector_mode` | Connector type | `source`, `destination-database`, `destination-warehouse`, `destination-activation`, `hybrid` |
 | `implementation_track` | Framework/layout | `python-dlt`, `java-api`, `java-jdbc` |
 | `auth_type` | Authentication method | `API key`, `OAuth client credentials`, `OAuth auth code`, `custom` |
 | `api_surface` | API details | `objects=customers,invoices; pagination=cursor; cursor_fields=created` |
@@ -168,8 +170,11 @@ test_credentials: GOOGLE_APPLICATION_CREDENTIALS
 ## Verification Script
 
 The bundled verification script auto-detects Java and Python/dlt connectors.
-It runs the Java checks below or Python/dlt structural and field-projection
-gates, including required unit and `ReadHarness` test evidence.
+It runs Python/dlt structural and field-projection gates, including required
+unit and `ReadHarness` test evidence, or all applicable Java checks:
+source/shared checks `1-15`, setup/dependency/cancellation checks `25-27`,
+schema compliance check `3.5`, and destination checks `16-24.6` when
+destination capabilities are present.
 
 ```bash
 # Run all checks
@@ -187,7 +192,8 @@ bash scripts/verify_connector.sh <connector-name>
 | 1 | RecordProcessor lifecycle (no manual close) |
 | 2 | DatasourceInitResponse usage |
 | 3 | Required methods implementation |
-| 4 | FieldMetadata requirements (originalDataType) |
+| 3.5 | ObjectMetadata and FieldMetadata requirements |
+| 4 | Version management |
 | 5 | Connector capabilities declared |
 | 6 | Property annotations |
 | 7 | Connection management |
@@ -199,6 +205,9 @@ bash scripts/verify_connector.sh <connector-name>
 | 13 | Cursor field setting invoked |
 | 14 | Build artifacts not committed |
 | 15 | Integration tests exist |
+| 25 | Parent POM module registration |
+| 26 | Dependency version management |
+| 27 | Cancellation support |
 
 ### Destination Checks (16-24)
 
@@ -210,10 +219,10 @@ Auto-detected when connector has `REPLICATION_DESTINATION` or `REVERSE_ETL_DESTI
 | 17 | mapToTargetObject() implementation |
 | 18 | load() implementation |
 | 19 | stage() implementation |
-| 20 | Staging/COPY INTO or activation_target |
-| 21 | MERGE or activation_target_field |
+| 20 | Direct CSV/COPY load, staged COPY INTO, or activation_target |
+| 21 | MERGE/upsert or activation_target_field |
 | 22 | LoadMode handling or merge_keys |
-| 23 | DDL generation or error/success processors |
+| 23 | DDL/schema evolution or error/success processors |
 | 24 | Destination integration tests |
 
 ## Skill Structure

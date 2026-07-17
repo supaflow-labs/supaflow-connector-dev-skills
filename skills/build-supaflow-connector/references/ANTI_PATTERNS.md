@@ -153,7 +153,7 @@ private void identifyCursorFields(ObjectMetadata object) {
     // Method exists but never called!
     for (FieldMetadata field : object.getFields()) {
         if (field.getName().contains("modified")) {
-            field.setCursorField(true);
+            field.setSourceCursorField(true);
         }
     }
 }
@@ -185,7 +185,7 @@ public SchemaResponse schema(SchemaRequest request) {
 private void identifyCursorFields(ObjectMetadata object) {
     for (FieldMetadata field : object.getFields()) {
         if (isCursorCandidate(field)) {
-            field.setCursorField(true);
+            field.setSourceCursorField(true);
         }
     }
     // Missing setCursorFieldLocked!
@@ -197,8 +197,8 @@ private void identifyCursorFields(ObjectMetadata object) {
 private void identifyCursorFields(ObjectMetadata object) {
     for (FieldMetadata field : object.getFields()) {
         if (isCursorCandidate(field)) {
-            field.setCursorField(true);
             field.setSourceCursorField(true);
+            field.setCursorCapable(true);
             field.setFilterable(true);
         }
     }
@@ -268,9 +268,13 @@ the SQL Server connector -- it was missing `.asTraditionalDatabase()` and shippe
 capabilities for months. Always start with one of: `.asTraditionalDatabase()`,
 `.asAPIConnector()`, or `.asCloudWarehouse()`.
 
+For direct database destinations, keep `.asTraditionalDatabase()` but use
+`.requiresExplicitLoadStep(true)` because `stage()` is a no-op and `load()` still performs the
+database write.
+
 ---
 
-### 7. No Primary Key on Objects
+### 7. No Source Primary Key on Objects
 
 **DO NOT:**
 ```java
@@ -285,13 +289,14 @@ object.setFields(fields);
 ```java
 List<FieldMetadata> fields = new ArrayList<>();
 FieldMetadata idField = createField("id", STRING, "String");
-idField.setPrimaryKey(true);  // Mark at least one field as PK
+idField.setSourcePrimaryKey(true);  // Connector-discovered default business key
+idField.setPrimaryKeyCapable(true);
 fields.add(idField);
 fields.add(createField("name", STRING, "String"));
 object.setFields(fields);
 ```
 
-**Why**: Primary keys are required for deduplication and upsert logic.
+**Why**: Source primary keys give the metadata merge layer a stable default for deduplication and upsert logic. Source discovery should not set `primaryKey` directly.
 
 ---
 
@@ -820,8 +825,8 @@ grep -rn "isInitialSync\|getCursorPosition" src/main/java/
 # Should return matches (cursor locked)
 grep -rn "setCursorFieldLocked" src/main/java/
 
-# Should return matches (primary keys set)
-grep -rn "setPrimaryKey" src/main/java/
+# Should return matches (source primary keys set)
+grep -rn "setSourcePrimaryKey" src/main/java/
 
 # Should NOT find target/ in git
 git ls-files | grep "^target/"
@@ -843,7 +848,7 @@ rg -n "selected_fields_factory|deselected" python/tests -g"*<name>*"
 | Not calling identifyCursorFields | CRITICAL | Code review |
 | Missing setCursorFieldLocked | CRITICAL | `grep setCursorFieldLocked` |
 | Wrong capabilities declared | CRITICAL | Code review |
-| No primary key | CRITICAL | `grep setPrimaryKey` |
+| No source primary key | CRITICAL | `grep setSourcePrimaryKey` |
 | **Hardcoded field parsing** | **CRITICAL** | Schema fields != parsed fields |
 | **Using raw maxCursorSeen without a boundary strategy** | **CRITICAL** | `grep maxCursorSeen` |
 | Accepting but ignoring field selection | CRITICAL | Sparse initial + incremental read tests |
@@ -865,14 +870,14 @@ rg -n "selected_fields_factory|deselected" python/tests -g"*<name>*"
 
 ## Destination Connector Anti-Patterns (Phase 7)
 
-### ❌ ANTI-PATTERN: Using Instant.now() for Sync Time
+### ANTI-PATTERN: Using Instant.now() for Sync Time
 
-**Severity**: 🔴 CRITICAL
+**Severity**: CRITICAL
 
 **Problem**: Creates inconsistency between ingestion cutoff time and destination sync time.
 
 ```java
-// ❌ WRONG
+// WRONG
 @Override
 public StageResponse stage(StageRequest request) {
     Instant syncTime = Instant.now();  // Different time than ingestion!
@@ -889,7 +894,7 @@ public StageResponse stage(StageRequest request) {
 
 **Solution**: Use request.syncTime
 ```java
-// ✅ CORRECT
+// CORRECT
 Instant syncTime = request.getSyncTime();
 if (syncTime == null) {
     throw new ConnectorException("syncTime is required in StageRequest",
@@ -901,14 +906,14 @@ if (syncTime == null) {
 
 ---
 
-### ❌ ANTI-PATTERN: Ignoring NamespaceRules in mapToTargetObject()
+### ANTI-PATTERN: Ignoring NamespaceRules in mapToTargetObject()
 
-**Severity**: 🔴 CRITICAL
+**Severity**: CRITICAL
 
 **Problem**: Pipeline prefix not applied, destination tables have wrong names.
 
 ```java
-// ❌ WRONG
+// WRONG
 @Override
 public ObjectMetadata mapToTargetObject(ObjectMetadata sourceObj,
                                         NamespaceRules namespaceRules,
@@ -928,7 +933,7 @@ public ObjectMetadata mapToTargetObject(ObjectMetadata sourceObj,
 
 **Solution**: Always apply NamespaceRules
 ```java
-// ✅ CORRECT
+// CORRECT
 String targetName = namespaceRules.getTableName(
     keywords, connectorType, quoteString, caseSensitive,
     defaultCatalog, defaultSchema,
@@ -941,14 +946,14 @@ dest.setName(IdentifierFormatter.formatSnakeCase(targetName));
 
 ---
 
-### ❌ ANTI-PATTERN: Adding Tracking Columns in mapToTargetObject()
+### ANTI-PATTERN: Adding Tracking Columns in mapToTargetObject()
 
-**Severity**: 🔴 CRITICAL
+**Severity**: CRITICAL
 
 **Problem**: Duplicates `_supa_*` columns (writer adds them automatically).
 
 ```java
-// ❌ WRONG
+// WRONG
 @Override
 public ObjectMetadata mapToTargetObject(...) {
     ObjectMetadata dest = new ObjectMetadata();
@@ -958,7 +963,7 @@ public ObjectMetadata mapToTargetObject(...) {
         dest.addField(field);
     }
 
-    // ❌ WRONG - Adding tracking columns manually
+    // WRONG - Adding tracking columns manually
     dest.addField(FieldMetadata.builder()
         .name("_supa_synced")
         .canonicalType(CanonicalType.INSTANT)
@@ -980,7 +985,7 @@ public ObjectMetadata mapToTargetObject(...) {
 
 **Solution**: Let writer/schema mapper handle tracking columns
 ```java
-// ✅ CORRECT - Just map source fields
+// CORRECT - Just map source fields
 for (FieldMetadata field : sourceObj.getFields()) {
     FieldMetadata mappedField = mapFieldWithNaming(field);
     dest.addField(mappedField);
@@ -995,14 +1000,14 @@ for (FieldMetadata field : sourceObj.getFields()) {
 
 ---
 
-### ❌ ANTI-PATTERN: Wrong CSV File Pattern in stage()
+### ANTI-PATTERN: Wrong CSV File Pattern in stage() or load()
 
-**Severity**: 🔴 CRITICAL
+**Severity**: CRITICAL
 
 **Problem**: Looking for `<table>_*.csv` instead of platform's `success_part_*.csv`.
 
 ```java
-// ❌ WRONG
+// WRONG
 @Override
 public StageResponse stage(StageRequest request) {
     String tableName = request.getMetadataMapping()
@@ -1018,13 +1023,13 @@ public StageResponse stage(StageRequest request) {
 **Why It's Wrong**:
 - Platform writes: `success_part_0_uuid.csv`, `success_part_1_uuid.csv`, etc.
 - Looking for `<table>_*.csv` finds **zero files**
-- stage() thinks there's no data, uploads nothing
+- stage()/load() thinks there's no data, uploads or loads nothing
 - load() fails silently (empty staging area)
 - Tests pass with simplified names like `test.csv` but production fails
 
 **Solution**: Use correct pattern
 ```java
-// ✅ CORRECT
+// CORRECT
 List<Path> csvFiles = Files.walk(localDataPath)
     .filter(Files::isRegularFile)
     .filter(p -> {
@@ -1034,19 +1039,41 @@ List<Path> csvFiles = Files.walk(localDataPath)
     .collect(Collectors.toList());
 ```
 
-**Detection**: Verify script CHECK 19 (enhanced), integration tests
+**Detection**: Verify script CHECK 19/20 (enhanced), integration tests
 
 ---
 
-### ❌ ANTI-PATTERN: Parsing CSV Without CsvFileFormat
+### ANTI-PATTERN: Returning a Fake Stage Location for Direct Database Destinations
 
-**Severity**: 🔴 CRITICAL
+**Severity**: CRITICAL
+
+**Problem**: Direct JDBC database destinations such as PostgreSQL and SQL Server do not use an external stage. Returning `StageResponse.success("No data to stage")` creates a stage location string and can push `load()` down the wrong code path.
+
+```java
+// WRONG for direct database destinations
+return StageResponse.success("No data to stage");
+```
+
+**Solution**: Return a no-op stage response when no stage exists.
+
+```java
+// CORRECT
+return StageResponse.noOp("Direct database load - no staging required");
+```
+
+**Detection**: Verify script CHECK 19, code review
+
+---
+
+### ANTI-PATTERN: Parsing CSV Without CsvFileFormat
+
+**Severity**: CRITICAL
 
 **Problem**: Parsing CSV files with hardcoded delimiter/quote/header logic instead of the
 `CsvFileFormat` passed in `StageRequest.getFileFormat()`.
 
 ```java
-// ❌ WRONG - Hardcoded CSV assumptions
+// WRONG - Hardcoded CSV assumptions
 try (CSVReader reader = new CSVReader(new FileReader(csvFile.toFile()))) {
     String[] header = reader.readNext(); // Assumes only 1 header row
 }
@@ -1060,7 +1087,7 @@ try (CSVReader reader = new CSVReader(new FileReader(csvFile.toFile()))) {
 
 **Solution**: Use CsvFileFormat from StageRequest
 ```java
-// ✅ CORRECT
+// CORRECT
 CsvFileFormat format = (request.getFileFormat() instanceof CsvFileFormat)
     ? (CsvFileFormat) request.getFileFormat()
     : new CsvFileFormat();
@@ -1073,14 +1100,14 @@ int skipHeader = format.getSkipHeader() != null ? format.getSkipHeader() : 1;
 
 ---
 
-### ❌ ANTI-PATTERN: Falling Back to String for Non-String Types
+### ANTI-PATTERN: Falling Back to String for Non-String Types
 
 **Severity**: 🟡 HIGH
 
 **Problem**: When parsing CSV values, returning a string for a field that should be numeric/date/time.
 
 ```java
-// ❌ WRONG
+// WRONG
 try {
     return Long.parseLong(value);
 } catch (Exception e) {
@@ -1095,7 +1122,7 @@ try {
 
 **Solution**: Return null for non-string types when parsing fails
 ```java
-// ✅ CORRECT
+// CORRECT
 try {
     return Long.parseLong(value);
 } catch (Exception e) {
@@ -1107,18 +1134,18 @@ try {
 
 ---
 
-### ❌ ANTI-PATTERN: Using jobContext.toString() for sync_id
+### ANTI-PATTERN: Using jobContext.toString() for sync_id
 
 **Severity**: 🟡 HIGH
 
-**Problem**: Gets object reference string, not actual job ID.
+**Problem**: Gets object reference string or an unrelated random value instead of the pipeline-provided job details ID.
 
 ```java
-// ❌ WRONG
+// WRONG
 String syncId = runtimeContext.getJobContext().toString();
 // Returns: "Job@a1b2c3d4" (object reference, not ID)
 
-// ❌ ALSO WRONG
+// WRONG
 String syncId = UUID.randomUUID().toString();
 // Returns: Random UUID, not linked to job
 ```
@@ -1126,31 +1153,33 @@ String syncId = UUID.randomUUID().toString();
 **Why It's Wrong**:
 - `toString()` returns object reference, not the ID field
 - Random UUID is not the actual job ID
+- The pipeline already passes the correct job details ID on stage/load requests
 - Can't track which job wrote which data
 - Data lineage is lost
 - Debugging sync issues is impossible
 
-**Solution**: Cast and extract ID
+**Solution**: Use the request's job details ID
 ```java
-// ✅ CORRECT
-Object jobContext = runtimeContext.getJobContext();
-String syncId = jobContext instanceof Job
-    ? ((Job) jobContext).getId()
-    : UUID.randomUUID().toString();  // Fallback only
+// CORRECT
+String syncId = request.getJobDetailsId();
+if (syncId == null || syncId.isBlank()) {
+    throw new ConnectorException("jobDetailsId is required",
+        ConnectorException.ErrorType.VALIDATION_ERROR);
+}
 ```
 
 **Detection**: Code review
 
 ---
 
-### ❌ ANTI-PATTERN: Simplified IT Test Data
+### ANTI-PATTERN: Simplified IT Test Data
 
 **Severity**: 🟡 HIGH
 
 **Problem**: Tests use simplified patterns that don't catch production issues.
 
 ```java
-// ❌ WRONG - Too simplified
+// WRONG - Too simplified
 @Test
 void testStage() {
     // Create test file with simple name
@@ -1172,7 +1201,7 @@ void testStage() {
 
 **Solution**: Use realistic patterns
 ```java
-// ✅ CORRECT - Match production
+// CORRECT - Match production
 @Test
 void testStage() {
     // Use production naming convention
@@ -1194,20 +1223,20 @@ void testStage() {
 
 ---
 
-### ❌ ANTI-PATTERN: Not Preserving customAttributes
+### ANTI-PATTERN: Not Preserving customAttributes
 
 **Severity**: 🟡 HIGH
 
 **Problem**: Losing connector-specific context stored in `customAttributes`.
 
 ```java
-// ❌ WRONG
+// WRONG
 @Override
 public ObjectMetadata mapToTargetObject(...) {
     ObjectMetadata dest = new ObjectMetadata();
     dest.setName(targetName);
     dest.setFields(mappedFields);
-    // ❌ Missing customAttributes copy
+    // WRONG - Missing customAttributes copy
     return dest;
 }
 ```
@@ -1219,7 +1248,7 @@ public ObjectMetadata mapToTargetObject(...) {
 
 **Solution**: Always preserve
 ```java
-// ✅ CORRECT
+// CORRECT
 if (sourceObj.getCustomAttributes() != null) {
     dest.setCustomAttributes(new HashMap<>(sourceObj.getCustomAttributes()));
 }
@@ -1236,7 +1265,8 @@ if (sourceObj.getCustomAttributes() != null) {
 | Using Instant.now() for sync time | CRITICAL | Code review |
 | Ignoring NamespaceRules | CRITICAL | Verify CHECK 17 |
 | Adding tracking columns | CRITICAL | Verify CHECK 17, code review |
-| Wrong CSV file pattern | CRITICAL | Verify CHECK 19, IT tests |
+| Wrong CSV file pattern | CRITICAL | Verify CHECK 19/20, IT tests |
+| Fake stage location for direct DB destination | CRITICAL | Verify CHECK 19 |
 | Parsing CSV without CsvFileFormat | CRITICAL | Code review, staging failures |
 | String fallback for non-string types | HIGH | Code review, Parquet errors |
 | jobContext.toString() for sync_id | HIGH | Code review |
