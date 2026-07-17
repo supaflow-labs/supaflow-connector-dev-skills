@@ -1,8 +1,6 @@
 ---
 name: build-supaflow-connector
-description: Build or review Supaflow connectors using a phased workflow for source connectors, structured destinations, and activation targets. Use this skill when implementing new connectors, debugging connector behavior, or validating connector quality in a Supaflow platform repository with gate checks and anti-pattern enforcement.
-argument-hint: <connector-name> <source|destination-database|destination-warehouse|destination-activation|hybrid>
-context: fork
+description: Build or review Java and Python/dlt Supaflow connectors using a phased workflow for source connectors, structured destinations, and activation targets. Use this skill when implementing a new connector, debugging connector reads or field selection, adding incremental sync, or validating connector quality in a Supaflow platform repository with executable gates and anti-pattern enforcement.
 ---
 
 # Build Supaflow Connector
@@ -14,7 +12,8 @@ Build connectors phase-by-phase, enforce verification gates before moving forwar
 - `platform_root`: absolute path to a Supaflow platform repo clone containing `pom.xml` and `connectors/`
 - `connector_name`: directory/module suffix (for example, `airtable`)
 - `connector_mode`: `source`, `destination-database`, `destination-warehouse`, `destination-activation`, or `hybrid`
-- `connector_base`: `jdbc` if JDBC-based (extends BaseJdbcConnector), otherwise `api` (default)
+- `implementation_track`: `python-dlt`, `java-jdbc`, or `java-api`
+- `connector_base`: `jdbc` if JDBC-based (extends BaseJdbcConnector), otherwise `api` (Java compatibility input)
 - `auth_type`: API key, OAuth client credentials, OAuth auth code, or custom
 - `api_surface`: object endpoints, pagination model, rate limits, and date/cursor fields
 - `test_credentials`: required env vars and sandbox/test account scope
@@ -45,11 +44,24 @@ rg -n "class BaseJdbcConnector|convertToCanonicalValue\\(|mapTypeByName\\(" \
   "$PLATFORM_ROOT/connectors" -g"*.java"
 ```
 
+For the Python/dlt track, replace the final Java search with:
+
+```bash
+rg -n "class DeclarativeDltConnector|def _compute_selected_fields|selected_fields_factory" \
+  "$PLATFORM_ROOT/python" -g"*.py"
+```
+
 Do not modify connector files until the Phase 0 gate output is shown.
 
 If your session context was compacted or you lost prior instructions, re-read this SKILL.md and repeat Phase 0 before continuing.
 
 ## Detect Connector Base
+
+Detect the implementation track from the target path before choosing phase docs:
+
+- `python/connectors/supaflow_connector_<name>/`: follow the **Python/dlt track** in `references/PYTHON_DLT_CONNECTOR_GUIDE.md`.
+- `connectors/supaflow-connector-<name>/` extending `BaseJdbcConnector`: follow the **Java JDBC track**.
+- Other `connectors/supaflow-connector-<name>/` modules: follow the **Java API track**.
 
 If the connector is JDBC-based (`connector_base: jdbc`), follow the **JDBC track**:
 - Phases 1, 2: same as API track
@@ -66,6 +78,7 @@ If the connector is API-based (REST, SOAP, GraphQL), follow the standard phase t
 - `destination-warehouse`: complete phases `1 -> 4`, then `7`, then destination tests/checks
 - `destination-activation`: complete phases `1 -> 4`, then `8`, then destination tests/checks
 - `hybrid`: combine the source track with the applicable destination track. Use Phase 7 for structured database/warehouse/file destinations and Phase 8 only for activation/API destinations.
+- `python-dlt` source: complete `references/PYTHON_DLT_CONNECTOR_GUIDE.md`; do not apply Java-only class or Maven requirements
 
 ## Load Phase Docs by Need
 
@@ -77,6 +90,7 @@ Load only the current phase doc. For JDBC connectors, load `references/JDBC_CONN
 - `references/PHASE_4_SCHEMA_DISCOVERY.md` (API connectors only)
 - `references/PHASE_5_READ_OPERATIONS.md` (API connectors only)
 - `references/JDBC_CONNECTOR_GUIDE.md` (JDBC connectors: replaces phases 3-5)
+- `references/PYTHON_DLT_CONNECTOR_GUIDE.md` (Python/dlt sources: replaces Java phases 1-6)
 - `references/PHASE_6_INTEGRATION_TESTING.md`
 - `references/PHASE_7_WRITE_OPERATIONS.md`
 - `references/PHASE_8_ACTIVATION_TARGETS.md`
@@ -106,6 +120,15 @@ mvn -pl connectors/supaflow-connector-<connector_name> -am -DskipTests clean ins
 bash "$SKILL_ROOT/scripts/verify_connector.sh" <connector_name> "$PLATFORM_ROOT"
 ```
 
+For Python/dlt connectors, use the platform development venv for tests; the
+same verifier auto-detects the Python connector layout:
+
+```bash
+cd "$PLATFORM_ROOT"
+python/.venv/bin/python -m pytest <connector-unit-and-integration-tests> -q
+bash "$SKILL_ROOT/scripts/verify_connector.sh" <connector_name> "$PLATFORM_ROOT"
+```
+
 Use full-repo build when dependency graph changes:
 
 ```bash
@@ -119,6 +142,8 @@ mvn clean install
 - Always implement incremental sync with `CutoffTimeSyncUtils` patterns (API connectors) or base class cursor support (JDBC connectors).
 - Never treat cursor position as a single scalar; respect incremental field structures.
 - Always run cursor identification (`identifyCursorFields()` or equivalent) and lock cursor fields.
+- Treat field selection as a runtime contract. Discovery exposes the full schema, but reads must emit only explicitly selected fields plus required identity, cursor, deletion, and framework fields. Push the projection into the source API when supported, and filter both dlt hints and emitted rows so deselected null columns cannot reappear during normalize.
+- Never treat an empty explicit selection as "all fields." `None`/unset means no explicit projection; an empty set means retain only required operational fields.
 - Ensure capabilities declared in connector metadata match implemented methods.
 - Apply cancellation checks in every long-running loop, retry loop, and statement execution path.
 - Treat `MetadataSkipReason` as a backend/frontend wizard contract. Do not add or repurpose enum values from a connector without coordinated frontend classification, copy, generated type, selection, validation, and save-behavior updates.
@@ -127,6 +152,7 @@ mvn clean install
 - For destinations, implement required destination methods and identifier formatter methods expected by mapping/pipeline.
 - JDBC connectors MUST override `convertToCanonicalValue()` to handle database-specific Java types returned by the JDBC driver. Without this, proprietary types (e.g., `microsoft.sql.DateTimeOffset`, `org.postgresql.util.PGobject`) cause ClassCastException at runtime.
 - Keep integration tests meaningful: incremental windows, cursor advancement, and schema-to-record field coverage.
+- Every source connector must include a sparse field-selection regression covering initial and incremental reads. Assert that a selected field is present, a known deselected field is absent, and required identity/cursor/system fields remain usable. Python/dlt connectors must exercise `ReadHarness(selected_fields_factory=...)` and verify source/API projection separately with a fake client.
 - For connector docs and marketing, existing clean docs are the template; connector code is only the validation source.
 - For connector docs and marketing, do not put object lists, sync modes, cursor fields, or internal columns in the opening paragraph.
 - For connector docs and marketing, treat protocol details, raw internal identifiers, endpoint paths, API-version/query-shape discussion, and versioned product wording like `v1 connector` as red flags unless the user truly needs them.
@@ -141,8 +167,9 @@ mvn clean install
 - Phase 0 completed (mandatory references read).
 - Phase 0 gate output shown before first code edit (and repeated after compaction).
 - Correct phase track completed for the connector mode.
-- Verification script passes all applicable final-state checks (`1-15`, `25-27`, and source/destination-specific checks; destinations also run `16-24` plus maturity and packaging gates).
+- Verification script passes all applicable final-state checks (Python/dlt field-projection gates, or Java checks `1-15`, `25-27`, and source/destination-specific checks; Java destinations also run `16-24` plus maturity and packaging gates).
 - Verification script re-run after integration tests are written (not just at end of build).
+- Field selection is behaviorally proven for initial and incremental reads; accepting a `selected_fields` argument without using it does not satisfy this criterion.
 - Anti-pattern checks reviewed before final handoff.
 - If the task includes connector docs or marketing, `references/CONNECTOR_DOCS_MARKETING.md` was followed and a red-flag sweep was completed before final handoff.
 - If the task includes connector marketing pages, a template-surface pass was completed to confirm the copy fits the actual renderer and data shape.

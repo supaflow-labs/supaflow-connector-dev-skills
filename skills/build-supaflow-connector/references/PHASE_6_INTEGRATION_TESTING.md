@@ -131,7 +131,7 @@ public class {Name}ConnectorIT {
     }
 
     // ================================================================
-    // REQUIRED TESTS (9 minimum)
+    // REQUIRED TESTS (10 minimum)
     // ================================================================
 
     @Test
@@ -308,7 +308,63 @@ public class {Name}ConnectorIT {
 
     @Test
     @Order(7)
-    @DisplayName("Test 7: Incremental sync should use cursor position")
+    @DisplayName("Test 7: Reads should honor an explicit field selection")
+    void testSelectedFieldProjection() throws ConnectorException {
+        if (schema == null) {
+            schema = loadSchema();
+        }
+
+        ObjectMetadata testObject = findObjectForTest(schema);
+        assertThat(testObject).isNotNull();
+
+        Map<String, Boolean> originalSelections = new HashMap<>();
+        testObject.getFields().forEach(field ->
+            originalSelections.put(field.getName(), field.getSelected()));
+        try {
+            // Start from an explicit empty projection, then retain operational
+            // identity/cursor fields and one ordinary business field.
+            testObject.getFields().forEach(field -> field.setSelected(false));
+            Set<String> selectedNames = testObject.getFields().stream()
+                .filter(field -> field.isPrimaryKey()
+                    || Boolean.TRUE.equals(field.getCursorField()))
+                .peek(field -> field.setSelected(true))
+                .map(FieldMetadata::getName)
+                .collect(Collectors.toSet());
+            FieldMetadata businessField = testObject.getFields().stream()
+                .filter(field -> !selectedNames.contains(field.getName()))
+                .findFirst()
+                .orElseThrow();
+            businessField.setSelected(true);
+            selectedNames.add(businessField.getName());
+
+            String deselectedName = testObject.getFields().stream()
+                .filter(field -> !selectedNames.contains(field.getName()))
+                .map(FieldMetadata::getName)
+                .findFirst()
+                .orElseThrow();
+
+            List<Map<String, Object>> records = new ArrayList<>();
+            connector.read(createReadRequest(
+                testObject, null, new TestRecordProcessor(records, 10)));
+
+            if (!records.isEmpty()) {
+                Set<String> businessKeys = records.get(0).keySet().stream()
+                    .filter(name -> name != null && !name.startsWith("_supa_"))
+                    .collect(Collectors.toSet());
+                assertThat(businessKeys).containsAll(selectedNames);
+                assertThat(businessKeys)
+                    .as("Deselected fields must not leak into emitted records")
+                    .doesNotContain(deselectedName);
+            }
+        } finally {
+            testObject.getFields().forEach(field ->
+                field.setSelected(originalSelections.get(field.getName())));
+        }
+    }
+
+    @Test
+    @Order(8)
+    @DisplayName("Test 8: Incremental sync should use cursor position")
     void testIncrementalSync() throws ConnectorException {
         if (schema == null) {
             schema = loadSchema();
@@ -427,8 +483,8 @@ public class {Name}ConnectorIT {
     }
 
     @Test
-    @Order(8)
-    @DisplayName("Test 8: Connector capabilities should be accurate")
+    @Order(9)
+    @DisplayName("Test 9: Connector capabilities should be accurate")
     void testCapabilities() {
         // Act
         Set<ConnectorCapabilities> capabilities = connector.getConnectorCapabilities();
@@ -442,8 +498,8 @@ public class {Name}ConnectorIT {
     }
 
     @Test
-    @Order(9)
-    @DisplayName("Test 9: Connector identity should be properly set")
+    @Order(10)
+    @DisplayName("Test 10: Connector identity should be properly set")
     void testConnectorIdentity() {
         // Assert
         assertThat(connector.getType())
@@ -572,6 +628,23 @@ For at least one incremental object, IT must validate:
 3. Zero-record advancement: when incremental returns no records, end cursor still advances for time-based cursors.
 4. End-state presence: `ReadResponse.syncState.endCursorPosition` is non-null and non-empty after incremental reads.
 
+### Field-Selection Test Oracles (Required)
+
+For at least one object with three or more business fields, IT must validate:
+
+1. One selected non-operational field is present.
+2. One known deselected field is absent from every emitted record.
+3. Primary-key, cursor, deletion, and framework-owned fields required for a
+   valid row remain available.
+4. No explicit selection (`selected=null` on every field) preserves the
+   connector's full/default projection.
+5. The sparse projection works on both the initial and incremental request
+   shapes. A source-level fake-client test may cover the incremental request
+   when the live account cannot be mutated deterministically.
+
+Do not count the full-schema record-mapping test as field-selection coverage;
+it proves completeness, not exclusion.
+
 ---
 
 ### Destination Connector Handoff Rule
@@ -600,8 +673,8 @@ Keep credentials in `export.env` and use `@EnabledIfEnvironmentVariable` or assu
 // ================================================================
 
 @Test
-@Order(10)
-@DisplayName("Test 10: Pagination should work correctly")
+@Order(11)
+@DisplayName("Test 11: Pagination should work correctly")
 void testPagination() throws ConnectorException {
     if (schema == null) {
         schema = loadSchema();
@@ -629,8 +702,8 @@ void testPagination() throws ConnectorException {
 }
 
 @Test
-@Order(11)
-@DisplayName("Test 11: Error handling for non-existent object")
+@Order(12)
+@DisplayName("Test 12: Error handling for non-existent object")
 void testReadNonExistentObject() {
     // Create fake object metadata
     ObjectMetadata fakeObject = new ObjectMetadata();
@@ -652,8 +725,8 @@ void testReadNonExistentObject() {
 }
 
 @Test
-@Order(12)
-@DisplayName("Test 12: Historical sync date should limit data")
+@Order(13)
+@DisplayName("Test 13: Historical sync date should limit data")
 void testHistoricalSyncDate() throws ConnectorException {
     // Set a recent historical sync date
     String originalDate = connector.historicalSyncStartDate;

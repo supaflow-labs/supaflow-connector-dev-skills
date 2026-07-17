@@ -508,7 +508,44 @@ See `SalesforceTimeBasedSyncUtils` in the Salesforce connector for a production 
 
 ---
 
-## Step 3: Extract Records with Proper Type Conversion
+## Step 3: Resolve the Runtime Field Projection
+
+`ReadRequest.objectMetadata.fields[*].selected` is authoritative whenever any
+field has an explicit `true` or `false` value:
+
+- If every `selected` value is `null`, no explicit projection was supplied;
+  use the full/default field set.
+- Otherwise, emit fields with `selected=true` plus primary-key, cursor,
+  deletion, and framework-required fields.
+- Do not interpret an empty explicit selection as all fields.
+- Push the effective field list into the vendor query when the API supports
+  partial responses. Fetching all fields and relying only on a downstream CSV
+  writer is not sufficient.
+
+```java
+private List<FieldMetadata> effectiveReadFields(ObjectMetadata metadata) {
+    List<FieldMetadata> fields = metadata.getFields();
+    boolean hasExplicitSelection = fields.stream()
+        .anyMatch(field -> field.getSelected() != null);
+
+    if (!hasExplicitSelection) {
+        return fields;
+    }
+
+    return fields.stream()
+        .filter(field -> Boolean.TRUE.equals(field.getSelected())
+            || field.isPrimaryKey()
+            || Boolean.TRUE.equals(field.getCursorField()))
+        .toList();
+}
+```
+
+Source-specific operational fields may be fetched without being emitted. For
+example, a deletion status or nested parent object may be needed to derive one
+selected output column. Keep separate `apiFields` and `emittedFields` sets so
+those internals do not leak into records.
+
+## Step 4: Extract Records with Proper Type Conversion
 
 The record map sent to `RecordProcessor.processRecord(...)` should contain canonical string values. `CursorTrackingCSVRecordProcessor` writes values by stringifying them and parses cursor values as ISO strings, so do not emit raw typed Java values such as `Instant`, `Long`, or `Boolean` as the final contract. Normalize source-specific raw formats first, then call `CanonicalTypeUtil.convertToCanonicalValue(rawValue, canonicalType)`.
 
@@ -520,10 +557,10 @@ import java.util.regex.Pattern;
 /**
  * Extract record from API response, mapping field names and types.
  */
-private Map<String, Object> extractRecord(JsonNode item, ObjectMetadata metadata) {
+private Map<String, Object> extractRecord(JsonNode item, List<FieldMetadata> effectiveFields) {
     Map<String, Object> record = new HashMap<>();
 
-    for (FieldMetadata field : metadata.getFields()) {
+    for (FieldMetadata field : effectiveFields) {
         String fieldName = field.getName();
         String sourceFieldName = field.getOriginalName() != null
             ? field.getOriginalName()
@@ -634,7 +671,11 @@ private Object normalizeInstantRawValue(String value) {
 
 ---
 
-## Step 4: Handle Pagination Properly
+Test exact record keys. A positive assertion that selected fields exist does
+not catch leakage; include a negative assertion proving a known deselected
+field is absent.
+
+## Step 5: Handle Pagination Properly
 
 Different APIs use different pagination patterns:
 
@@ -741,7 +782,7 @@ throw new ConnectorException("Retry loop exhausted", ConnectorException.ErrorTyp
 
 ---
 
-## Step 5: Build ReadResponse
+## Step 6: Build ReadResponse
 
 Use `SyncStateResponseBuilder` to build the response - **DO NOT** manually set cursor position!
 
@@ -779,7 +820,7 @@ return ReadResponse.builder()
 
 ---
 
-## Step 6: Handle High-Volume Objects
+## Step 7: Handle High-Volume Objects
 
 Many marketing/analytics platforms have objects with massive record counts (events, activities, logs). Apply default date filters to prevent overwhelming syncs.
 
@@ -824,7 +865,7 @@ private String getEffectiveStartDate(String objectName) {
 
 ---
 
-## Step 7: Handle Different Object Types
+## Step 8: Handle Different Object Types
 
 When handling different API types (REST, SOAP, custom endpoints), route appropriately but **always use the same CutoffTimeSyncUtils pattern** for cursor handling:
 
@@ -871,7 +912,7 @@ public ReadResponse read(ReadRequest request) throws ConnectorException {
 
 ---
 
-## Step 7: Implement close()
+## Step 9: Implement close()
 
 ```java
 @Override
