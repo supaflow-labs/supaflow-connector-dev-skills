@@ -20,6 +20,10 @@ Example with this repo:
 rsync -a /path/to/supaflow-connector-skills/skills/build-supaflow-connector/ ~/.codex/skills/build-supaflow-connector/
 ```
 
+Install a real directory with `rsync`; do not use a symlink. Some Codex skill
+registries do not index symlinked skill directories. Validate the installed
+copy and start a new session after every skill update.
+
 ### 2) Start a new Codex session
 
 Codex loads installed skills at session start. Open a new chat/session after copying the skill.
@@ -58,8 +62,15 @@ test_credentials: STRIPE_API_KEY
 | 8 | `PHASE_8_ACTIVATION_TARGETS.md` | API destinations: activation mappings | 3, 12 |
 | - | `ANTI_PATTERNS.md` | Common mistakes to avoid | All |
 | JDBC | `JDBC_CONNECTOR_GUIDE.md` | **Replaces phases 3-5 for JDBC connectors** | JDBC-specific |
+| Python/dlt | `PYTHON_DLT_CONNECTOR_GUIDE.md` | **Replaces Java phases 1-6 for Python/dlt sources** | Python field-selection and read-harness gates |
 
 **JDBC Connectors**: If the connector extends `BaseJdbcConnector` (uses a JDBC driver), follow `JDBC_CONNECTOR_GUIDE.md` instead of phases 3-5. The base class handles read(), schema(), cursor fields, and cancellation. You only implement `validateAndSetConnectorProperties()`, `mapTypeByName()`, `convertToCanonicalValue()`, and source-only stubs.
+
+**Python/dlt Connectors**: If the connector lives under
+`python/connectors/supaflow_connector_<name>/` and extends
+`DeclarativeDltConnector`, follow `PYTHON_DLT_CONNECTOR_GUIDE.md`. The Python
+track requires behavioral field-selection tests at the adapter, source, and
+`ReadHarness` layers.
 
 **Destination Phases**:
 - **Phase 7**: For warehouse destinations (Snowflake, BigQuery) - creates tables/schemas via DDL
@@ -188,6 +199,15 @@ build-supaflow-connector/
 | 14 | Build artifacts not committed | 1 |
 | 15 | Integration tests exist | 6 |
 
+### Python/dlt Source Checks
+
+| Check | What It Verifies |
+|-------|------------------|
+| PY1 | Connector directly extends `DeclarativeDltConnector` |
+| PY2 | `_create_source` accepts and consumes `selected_fields` |
+| PY3 | Source/adapter unit tests prove deselected-field exclusion and incremental/token projection |
+| PY4 | Live or `ReadHarness(selected_fields_factory=...)` sparse projection coverage exists |
+
 ### Destination Connector Checks (16-24)
 
 Auto-detected when connector has `REPLICATION_DESTINATION` or `REVERSE_ETL_DESTINATION` capability.
@@ -225,3 +245,4 @@ These are mandatory in addition to `verify_connector.sh`:
 4. **Integration test oracle quality**
    - Incremental IT validates lower/upper bounds and zero-record cursor advancement.
    - Record mapping IT validates schema-to-record field coverage, not just non-empty reads.
+   - Sparse field-selection IT asserts both presence and absence and exercises initial plus incremental request shapes.

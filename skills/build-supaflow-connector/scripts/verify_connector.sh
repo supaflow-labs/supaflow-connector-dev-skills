@@ -12,6 +12,7 @@ fi
 
 CONNECTOR_NAME="$1"
 PLATFORM_ROOT="${2:-${SUPAFLOW_PLATFORM_ROOT:-$(pwd)}}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 if [ ! -d "$PLATFORM_ROOT" ]; then
     echo "ERROR: Platform root does not exist: $PLATFORM_ROOT"
@@ -24,6 +25,21 @@ if [ ! -f "$PLATFORM_ROOT/pom.xml" ] || [ ! -d "$PLATFORM_ROOT/connectors" ]; th
 fi
 
 cd "$PLATFORM_ROOT" || exit 1
+
+# Python/dlt connectors live outside the Java Maven module tree. Route them to
+# the AST + behavioral-test-evidence verifier before applying Java-only checks.
+PYTHON_CONNECTOR_NAME="${CONNECTOR_NAME//-/_}"
+PYTHON_CONNECTOR_FILE="python/connectors/supaflow_connector_${PYTHON_CONNECTOR_NAME}/connector.py"
+if [ -f "$PYTHON_CONNECTOR_FILE" ]; then
+    PYTHON_BIN="python/.venv/bin/python"
+    if [ ! -x "$PYTHON_BIN" ]; then
+        PYTHON_BIN="python3"
+    fi
+    exec "$PYTHON_BIN" \
+        "$SCRIPT_DIR/verify_python_dlt_connector.py" \
+        "$PYTHON_CONNECTOR_NAME" \
+        "$PLATFORM_ROOT"
+fi
 
 CONNECTOR_DIR="connectors/supaflow-connector-${CONNECTOR_NAME}"
 CONNECTOR_SRC_DIR="$CONNECTOR_DIR/src/main/java/io/supaflow/connector"

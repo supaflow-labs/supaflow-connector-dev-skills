@@ -23,7 +23,7 @@ Works with **Claude Code**, **OpenAI Codex**, and any agent that supports skill/
 ## What this does
 
 **Does**
-- Walk an AI coding agent through building a complete Supaflow connector (source, warehouse destination, or activation target)
+- Walk an AI coding agent through building Java or Python/dlt Supaflow connectors (source, warehouse destination, or activation target)
 - Enforce phased gates -- the agent cannot skip ahead until the current phase passes verification
 - Catch 20+ known anti-patterns before they reach production (e.g., calling `processor.close()`, missing `originalDataType`, using raw `maxCursorSeen` without a compatible boundary strategy)
 - Run automated verification (24 checks for source + destination connectors)
@@ -54,6 +54,7 @@ The skill will ask you to provide the following inputs. Here's how to fill them 
 | `platform_root` | Absolute path to your `supaflow-platform` clone | `/home/user/supaflow-platform` |
 | `connector_name` | Short lowercase name used as the module suffix. Becomes `supaflow-connector-<name>` | `stripe`, `sqlserver`, `bigquery` |
 | `connector_mode` | What the connector does. Pick one | `source`, `destination-warehouse`, `destination-activation`, `hybrid` |
+| `implementation_track` | Connector framework/layout | `python-dlt`, `java-api`, `java-jdbc` |
 | `auth_type` | How the source/destination authenticates. Use `custom` if it doesn't fit a standard pattern | `API key`, `OAuth client credentials`, `OAuth auth code`, `custom` |
 | `api_surface` | Describe the API: what objects exist, how pagination works, rate limits, and which fields support incremental sync. For JDBC connectors, mention the driver and reference the closest existing connector | `JDBC-based (like postgres); objects=tables,views; cursor_fields=datetime columns` |
 | `test_credentials` | Environment variable names needed for integration tests | `STRIPE_API_KEY` or `SQLSERVER_HOST, SQLSERVER_PORT, SQLSERVER_USERNAME, SQLSERVER_PASSWORD` |
@@ -91,7 +92,11 @@ Each agent platform has its own installation steps:
 - **OpenAI Codex**: See [`skills/build-supaflow-connector/references/README.md`](skills/build-supaflow-connector/references/README.md) for Codex-specific install and trigger instructions.
 - **Other agents**: Point the agent at `skills/build-supaflow-connector/SKILL.md` as its system prompt, and ensure it has access to the `references/` and `scripts/` subdirectories. Trigger mechanics are agent-specific.
 
-**Note on SKILL.md frontmatter:** The frontmatter includes Claude Code-specific keys (`disable-model-invocation`, `argument-hint`, `context`). Codex's `quick_validate.py` reports these as unexpected, but both runtimes load and execute the skill correctly. Treat the validator warning as non-blocking.
+**Codex installation note:** Install a real directory with the `rsync` command
+in the Codex-specific guide. Do not use a symlink for Codex; some skill
+registries do not index symlinked directories. `SKILL.md` uses portable
+frontmatter containing only `name` and `description`, and `quick_validate.py`
+must pass.
 
 ## How it works
 
@@ -106,6 +111,7 @@ prerequisite reading, and a gate check that must pass before proceeding.
 | Warehouse Destination | 1 &rarr; 2 &rarr; 3 &rarr; 4 &rarr; 7 + destination tests |
 | Activation Destination | 1 &rarr; 2 &rarr; 3 &rarr; 4 &rarr; 8 + destination tests |
 | Hybrid | Both 7 and 8 |
+| Python/dlt Source | `PYTHON_DLT_CONNECTOR_GUIDE.md` (replaces Java phases 1-6) |
 
 ### Phases
 
@@ -128,6 +134,8 @@ These rules are enforced at every phase:
 - Always set `originalDataType` on every `FieldMetadata`
 - Always implement incremental sync with `CutoffTimeSyncUtils`
 - Always run `identifyCursorFields()` and lock cursor fields
+- Honor explicit field selection in vendor requests, normalized rows, and dlt hints; preserve only required operational/system fields
+- Prove sparse selection on initial and incremental reads, including a negative assertion for a deselected field
 - Declared capabilities must match implemented methods
 - Cancellation checks in every long-running loop
 - For destinations: apply `NamespaceRules`, use `request.getSyncTime()`, don't add tracking columns manually
@@ -141,6 +149,7 @@ These rules are enforced at every phase:
 | `platform_root` | Absolute path to Supaflow platform repo | `/home/user/supaflow-platform` |
 | `connector_name` | Module suffix | `stripe` |
 | `connector_mode` | Connector type | `source`, `destination-warehouse`, `destination-activation`, `hybrid` |
+| `implementation_track` | Framework/layout | `python-dlt`, `java-api`, `java-jdbc` |
 | `auth_type` | Authentication method | `API key`, `OAuth client credentials`, `OAuth auth code`, `custom` |
 | `api_surface` | API details | `objects=customers,invoices; pagination=cursor; cursor_fields=created` |
 | `test_credentials` | Required env vars | `STRIPE_API_KEY` |
@@ -158,7 +167,9 @@ test_credentials: GOOGLE_APPLICATION_CREDENTIALS
 
 ## Verification Script
 
-The bundled verification script runs 24 automated checks against a connector module.
+The bundled verification script auto-detects Java and Python/dlt connectors.
+It runs the Java checks below or Python/dlt structural and field-projection
+gates, including required unit and `ReadHarness` test evidence.
 
 ```bash
 # Run all checks
@@ -215,7 +226,8 @@ supaflow-connector-dev-skills/
 │       ├── agents/
 │       │   └── openai.yaml                   # OpenAI Codex agent config
 │       ├── scripts/
-│       │   └── verify_connector.sh           # Gate verification script
+│       │   ├── verify_connector.sh           # Auto-detecting gate entry point
+│       │   └── verify_python_dlt_connector.py # Python/dlt projection gate
 │       └── references/
 │           ├── README.md                     # Skill quick reference
 │           ├── ANTI_PATTERNS.md              # 20+ anti-patterns with fixes
@@ -227,7 +239,9 @@ supaflow-connector-dev-skills/
 │           ├── PHASE_5_READ_OPERATIONS.md    # read(), SyncState, CutoffTime
 │           ├── PHASE_6_INTEGRATION_TESTING.md # IT tests, verification
 │           ├── PHASE_7_WRITE_OPERATIONS.md   # Warehouse: stage(), load()
-│           └── PHASE_8_ACTIVATION_TARGETS.md # API destinations
+│           ├── PHASE_8_ACTIVATION_TARGETS.md # API destinations
+│           └── PYTHON_DLT_CONNECTOR_GUIDE.md # Python/dlt source track
+├── tests/                                    # Verifier regression tests
 ├── LICENSE
 └── README.md
 ```
@@ -255,6 +269,8 @@ The `platform_root` directory must contain:
 - `pom.xml` (root Maven POM)
 - `connectors/` directory
 - `supaflow-connector-sdk/` and `supaflow-core/` modules
+- For Python/dlt connectors: `python/connectors/`,
+  `python/supaflow_dlt_runtime/`, and the platform Python development venv
 
 ### Customizing Reference Connectors
 
@@ -268,8 +284,9 @@ before invoking the skill:
 ## FAQ
 
 **Do I need the full Supaflow platform to use this?**
-Yes. The skill generates code that compiles against `supaflow-connector-sdk` and `supaflow-core`.
-You need a working `supaflow-platform` clone with `mvn clean install` passing.
+Yes. Java connectors compile against `supaflow-connector-sdk` and
+`supaflow-core`; Python/dlt connectors use the platform Python runtime and
+testkit. You need a working `supaflow-platform` clone for the selected track.
 
 **Can I use this for non-Supaflow connectors?**
 The skill is specific to the Supaflow connector interface (`SupaflowConnector`). The anti-patterns

@@ -756,7 +756,39 @@ public Boolean enableFeature = true;
 
 ---
 
-### 16. Skipping Essential Reading
+### 16. Accepting Field Selection but Ignoring It (CRITICAL)
+
+**DO NOT:**
+
+```python
+def _create_source(..., selected_fields=None, ...):
+    return source()  # selected_fields is accepted but ignored
+```
+
+```java
+for (FieldMetadata field : metadata.getFields()) {
+    record.put(field.getName(), extract(item, field)); // emits deselected fields
+}
+```
+
+**DO:**
+
+- Distinguish no explicit projection (`None`/all `selected=null`) from an
+  explicit empty selection.
+- Retain only selected output fields plus documented primary-key, cursor,
+  deletion, and framework-required fields.
+- Push the projection into the vendor request when supported.
+- Filter both normalized rows and dlt hints.
+- Test a selected field and a known deselected field on initial and
+  incremental request shapes.
+
+**Why:** Accepting a selection argument without consuming it looks compatible
+in code review but leaks unwanted columns, increases API cost, and can cause
+dlt normalize to recreate deselected columns as nulls.
+
+---
+
+### 17. Skipping Essential Reading
 
 **DO NOT:**
 - Jump straight to coding without reading core classes
@@ -793,6 +825,10 @@ grep -rn "setPrimaryKey" src/main/java/
 
 # Should NOT find target/ in git
 git ls-files | grep "^target/"
+
+# Python/dlt: selected_fields must be consumed and behaviorally tested
+rg -n "selected_fields" python/connectors/supaflow_connector_<name>/connector.py
+rg -n "selected_fields_factory|deselected" python/tests -g"*<name>*"
 ```
 
 ---
@@ -810,6 +846,7 @@ git ls-files | grep "^target/"
 | No primary key | CRITICAL | `grep setPrimaryKey` |
 | **Hardcoded field parsing** | **CRITICAL** | Schema fields != parsed fields |
 | **Using raw maxCursorSeen without a boundary strategy** | **CRITICAL** | `grep maxCursorSeen` |
+| Accepting but ignoring field selection | CRITICAL | Sparse initial + incremental read tests |
 | Wrong pagination | MODERATE | Manual test |
 | Ignoring lookbackTimeSeconds | MODERATE | `grep lookback` |
 | No context for read() | MODERATE | Check customAttributes |
