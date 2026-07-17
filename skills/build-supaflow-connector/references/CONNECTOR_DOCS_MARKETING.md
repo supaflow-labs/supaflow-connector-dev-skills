@@ -50,6 +50,23 @@ grep -i '<slug>' docs-src/docs/03-destinations/index.md   # destination docs
 
 Zero matches in the relevant index = the entry didn't land. Fix before committing.
 
+## Related Pages Are Required
+
+Every primary source connector doc must include a `## Related Pages` section
+immediately before `## Support`. The section must contain at least four
+descriptive links:
+
+- the source's connector overview on `/connectors/{slug}`
+- the ingestion-pipeline guide
+- a relevant destination guide
+- at least one genuinely related sibling source doc
+
+Add the source-to-destination landing page or a companion implementation guide
+when one exists. Choose sibling sources by category or user workflow; do not
+repeat the same generic source list across every page. The website's
+`source-docs-related-pages` lint check enforces the minimum link count and
+sibling-source requirement.
+
 ## Marketing Pages Are Templated
 
 Connector marketing pages in `supaflow-www/data/connectors/marketing/*.ts` fill the
