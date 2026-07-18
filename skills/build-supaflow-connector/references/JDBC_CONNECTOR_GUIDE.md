@@ -157,6 +157,8 @@ If the connector should also be a destination, do not use the stubs above. Add `
 - `load()` handles `request.isDdlOnly()` and `request.isZeroRows()` before requiring `localDataPath`.
 - `load()` discovers `success_part_*.csv` files from `request.getLocalDataPath()` and ignores error files.
 - `load()` creates an in-database staging table, bulk-loads local CSV data, updates tracking columns with `request.getSyncTime()` and `request.getJobDetailsId()`, then executes the requested load mode.
+- Staging and target data columns remain physically nullable even when source metadata has
+  `nillable=false`; additive columns are nullable as well.
 - Keep `executeSqlScript()` inherited from `BaseJdbcConnector` unless the database needs connector-specific script behavior.
 
 For SQL Server destination support, model the implementation on Postgres but adapt the dialect: SQL Server identifiers, native type mapping, bulk-load API, staging-table DDL, `MERGE` syntax, and schema-evolution SQL.
@@ -168,6 +170,9 @@ For SQL Server destination support, model the implementation on Postgres but ada
 Connector-specific destination code should:
 - Reuse inherited FQN/formatter methods instead of hand-concatenating catalog/schema/table names.
 - Override or configure only database-specific pieces such as quote string (`"` vs `[]`), separator, catalog/schema support, and identifier case sensitivity.
+- Preserve destination-legal names under `MIRROR_SOURCE`. Apply `NamespaceRules` before
+  destination validation/quoting, reject invalid or blank results, and detect collisions caused by
+  any required lossy transformation.
 - Follow `PostgresConnector.mapToTargetObject(...)` as the direct database reference, then swap in the connector's own data type mapper and dialect helpers.
 
 ## What You MUST Override For Source Correctness
@@ -472,6 +477,10 @@ Before proceeding to Phase 6 (integration testing), verify:
 - [ ] If source+destination: `getConnectorCapabilities()` includes `REPLICATION_DESTINATION`
 - [ ] If source+destination: `stage()` returns `StageResponse.noOp(...)`, not a fake stage location
 - [ ] If source+destination: `load()` reads `LoadRequest.getLocalDataPath()`, handles DDL-only/zero-rows, and uses `request.getSyncTime()` plus `request.getJobDetailsId()`
+- [ ] If source+destination: legal identifiers survive `MIRROR_SOURCE`, invalid/blank names fail,
+      and lossy transformations have collision tests
+- [ ] If source+destination: non-nullable source fields remain nullable in staging/target DDL and
+      additive evolution
 - [ ] POM has JDBC driver as `provided` scope with correct shade excludes
 - [ ] Destination connectors review/override `isRetryableException(SQLException)` and test terminal-error exclusions
 - [ ] Destination connectors cover concurrent first-load objects into a brand-new schema

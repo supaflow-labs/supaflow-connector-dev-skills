@@ -158,6 +158,22 @@ mvn clean install
 - Never default `trustServerCertificate=true` for production-facing connectors. Use `false` by default and require explicit opt-in for insecure/dev TLS behavior.
 - Source-only connectors MUST implement stub methods for `mapToTargetObject`, `stage`, and `load` that throw `UnsupportedOperationException` or `ConnectorException` with `UNSUPPORTED_OPERATION`. The interface requires them even if the connector is source-only.
 - For destinations, implement required destination methods and identifier formatter methods expected by mapping/pipeline.
+- Treat destination identifiers as a two-stage contract: `NamespaceRules` decides whether a name
+  is preserved or intentionally transformed, then the destination validates and quotes it. Under
+  `MIRROR_SOURCE`, preserve every destination-legal source name exactly; quoting does not make an
+  invalid API resource ID valid. Reject empty/invalid namespace results, and make every necessary
+  lossy transformation collision-safe instead of inventing a silent fallback name.
+- Do not propagate source `NOT NULL` metadata into physical destination data columns. Keep staging
+  and target data fields nullable so sparse tombstones and later nullability relaxation remain
+  loadable; added columns on existing warehouse tables must also be nullable.
+- For asynchronous warehouse jobs, make submission restart-safe: derive deterministic per-attempt
+  IDs, fetch before create, attach to duplicate/already-existing jobs with bounded visibility
+  polling, and classify retries per operation. Do not put a quota reason into a shared retry set
+  merely because one metadata API benefits from retrying it.
+- Keep connector initialization and connection validation side-effect-free with respect to
+  customer namespaces and tables. Validate the exact destination identifiers used by load, fail
+  incomplete destination-role configuration early, preserve transient/service error types, and do
+  not run an expensive write probe at the start of every sync.
 - JDBC source and hybrid connectors MUST override `convertToCanonicalValue()` to handle both
   database-specific Java classes and canonical-type semantics. In particular, native JSON returned
   as text must remain a JSON object/array/scalar rather than becoming a quoted JSON string.
@@ -206,6 +222,13 @@ mvn clean install
   evidence.
 - Warehouse IT proves additive and type-change schema evolution, advertised hard deletes, and
   user-owned physical-design preservation after destructive load paths.
+- Warehouse IT proves identifier behavior through the production stage/load path, including quoted
+  legal names, invalid or empty namespace rejection, and collision handling after any lossy
+  transformation. DDL-only quoting tests are not sufficient.
+- Warehouse IT starts from source metadata with `nillable=false` and proves staging plus target
+  data columns remain physically nullable. Do not add migration code for schemas that existed only
+  in unreleased development revisions; add compatibility migrations only for released or adopted
+  physical states the connector must actually support.
 - External-stage IT proves normal and failure-path cleanup (or bounded retained diagnostics);
   cleanup code and lifecycle configuration without execution-path assertions are not evidence.
 - Anti-pattern checks reviewed before final handoff.

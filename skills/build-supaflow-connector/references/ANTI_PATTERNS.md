@@ -985,6 +985,33 @@ dest.setName(IdentifierFormatter.formatSnakeCase(targetName));
 
 ---
 
+### ANTI-PATTERN: Silently Rewriting Destination-Legal Identifiers
+
+**Severity**: CRITICAL
+
+Applying `NamespaceRules` and then stripping leading underscores, adding a letter prefix, or
+collapsing unsupported characters without collision handling can route distinct source objects to
+one destination object. It also violates `MIRROR_SOURCE`, whose purpose is to preserve legal source
+names.
+
+**Solution**:
+
+- Preserve raw source names through discovery.
+- Let `NamespaceRules` perform the user-selected transformation.
+- Validate each destination identifier class separately.
+- Quote legal SQL identifiers instead of sanitizing them merely to avoid quoting.
+- Reject invalid/blank resource namespaces, and resolve or reject every collision caused by a
+  necessary lossy transformation.
+
+Do not fabricate `_`, `n`, or another placeholder when normalization produces an empty name.
+Quoting does not make an invalid dataset/schema/API resource ID legal.
+
+**Detection**: Unit tests with leading digits/underscores, special characters, empty results, and
+two distinct inputs that would normalize to the same output; live IT through the production load
+format.
+
+---
+
 ### ANTI-PATTERN: Adding Tracking Columns in mapToTargetObject()
 
 **Severity**: CRITICAL
@@ -1297,6 +1324,28 @@ if (sourceObj.getCustomAttributes() != null) {
 
 ---
 
+### ANTI-PATTERN: Propagating Source NOT NULL Into Destination Data Columns
+
+**Severity**: CRITICAL
+
+Source nullability is metadata about the source, not a physical destination constraint. Making
+staging or target data columns required breaks sparse hard-delete tombstones, prevents later
+nullability relaxation, and makes additive evolution fail on warehouses that forbid adding a
+required column to an existing table.
+
+**Solution**: Create physical staging and target data fields as nullable, including source primary
+keys, and add new columns as nullable. Preserve any established shared convention for system fields
+without deriving data-column constraints from `FieldMetadata.nillable`.
+
+Do not add a migration for physical schemas produced only by an unreleased development revision.
+Add compatibility code only for a released or explicitly adopted physical state the connector must
+support.
+
+**Detection**: Start with source fields where `nillable=false`; inspect stage and target schemas and
+load a sparse tombstone/null through the real path.
+
+---
+
 ### ANTI-PATTERN: Merging the Raw Stage Without Deterministic Deduplication
 
 **Severity**: CRITICAL
@@ -1343,12 +1392,51 @@ retained-diagnostics state protected by a short lifecycle rule.
 
 ---
 
+### ANTI-PATTERN: Retrying Asynchronous Warehouse Jobs Without Stable Identity
+
+**Severity**: CRITICAL
+
+Submitting a new vendor job after a lost response can duplicate work. Treating
+duplicate/already-exists as failure discards a healthy job, while returning a retriable error after
+cancelling a deterministic job on timeout can make every platform retry reattach to the cancelled
+job.
+
+**Solution**: Use deterministic per-attempt IDs, fetch before submit, attach to duplicate jobs with
+bounded visibility polling, recover ambiguous submits under the same ID, and advance attempts only
+after a terminal retriable vendor result. Keep quota and retry classifications operation-specific.
+Use runtime cancellation in every poller; make connector job timeouts opt-in unless the platform
+defines a different default, and report timeout-after-cancel as terminal.
+
+**Detection**: Unit tests for get-first restart, 409/duplicate plus temporary get-not-found,
+ambiguous submit, terminal quota, cancellation, and timeout.
+
+---
+
+### ANTI-PATTERN: Creating Customer Resources During Routine Validation
+
+**Severity**: HIGH
+
+Creating a schema/dataset/table or running an upload/load probe from normal `init()` hides
+misspelled configuration, leaks resources, consumes job quota on every sync, and can validate a
+different normalized name than `load()` actually uses.
+
+**Solution**: Keep routine initialization metadata-only and side-effect-free. Validate required
+destination-role settings, the exact target identifiers used by load, resource existence/location,
+and error classifications. Run a write probe only in a distinct user-invoked connection-test flow
+with cancellation and guaranteed cleanup.
+
+**Detection**: Assert normal init performs no create/upload/load calls and preserves transient,
+permission, validation, and cancellation error types.
+
+---
+
 ## Destination Anti-Patterns Summary
 
 | Anti-Pattern | Severity | Detection Method |
 |-------------|----------|------------------|
 | Using Instant.now() for sync time | CRITICAL | Code review |
 | Ignoring NamespaceRules | CRITICAL | Verify CHECK 17 |
+| Silently rewriting legal identifiers | CRITICAL | Collision tests + production-format live IT |
 | Adding tracking columns | CRITICAL | Verify CHECK 17, code review |
 | Wrong CSV file pattern | CRITICAL | Verify CHECK 19/20, IT tests |
 | Fake stage location for direct DB destination | CRITICAL | Verify CHECK 19 |
@@ -1357,10 +1445,13 @@ retained-diagnostics state protected by a short lifecycle rule.
 | jobContext.toString() for sync_id | HIGH | Code review |
 | Simplified IT test data | HIGH | Code review, CHECK 24 |
 | Not preserving customAttributes | HIGH | Code review |
+| Propagating source NOT NULL | CRITICAL | Required-source metadata + sparse-row live IT |
 | Merging a raw, duplicate stage | CRITICAL | SQL unit test + live merge |
 | Testing only `_supa_*` field presence | CRITICAL | Exact live schema/value assertions |
 | Treating setup tokens as behavioral evidence | CRITICAL | Assertion-level verifier checks |
 | Cleaning external staging only on success | CRITICAL | Failure-path live IT |
+| Retrying async jobs without stable identity | CRITICAL | Duplicate/ambiguous-submit/timeout tests |
+| Creating customer resources during routine validation | HIGH | Side-effect and error-classification tests |
 
 ---
 

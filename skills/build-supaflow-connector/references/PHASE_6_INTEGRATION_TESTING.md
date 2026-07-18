@@ -690,6 +690,16 @@ For warehouse destinations, the minimum live IT evidence is:
 - Schema evolution DDL beyond column addition, including type changes.
 - All-type and binary round trips for the writer format used by the destination.
 - Stage file discovery using production `success_part_*` names.
+- Identifier behavior through the production writer/stage/load format: quoted legal names,
+  invalid/empty namespace rejection, and collision handling after lossy normalization. A standalone
+  DDL/DML quoting test is necessary but not sufficient.
+- Source metadata with `nillable=false` still produces physically nullable staging and target data
+  fields, including additive evolution.
+- For asynchronous warehouse APIs: deterministic get-first job recovery, duplicate visibility lag,
+  ambiguous submit, operation-scoped quota/retry classification, cancellation, and opt-in timeout
+  behavior.
+- Routine destination initialization is side-effect-free and validates the same target namespace
+  used by load.
 - Any destination physical-design preservation required by drop/recreate paths.
 
 Keep credentials in `export.env` and use `@EnabledIfEnvironmentVariable` or assumptions so CI without live credentials skips cleanly.
