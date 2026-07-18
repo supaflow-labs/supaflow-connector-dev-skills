@@ -8,6 +8,7 @@
 
 - [Critical Anti-Patterns (Will Break Connector)](#critical-anti-patterns-will-break-connector)
   - [8b. Missing convertToCanonicalValue Override (JDBC Connectors)](#8b-missing-converttocanonicalvalue-override-jdbc-connectors)
+  - [8d. Treating Native JSON Text as a Plain String](#8d-treating-native-json-text-as-a-plain-string)
 - [Moderate Anti-Patterns (May Cause Issues)](#moderate-anti-patterns-may-cause-issues)
   - [8c. Insecure TLS Default (`trustServerCertificate=true`)](#8c-insecure-tls-default-trustservercertificatetrue)
 - [Minor Anti-Patterns (Code Quality)](#minor-anti-patterns-code-quality)
@@ -391,6 +392,29 @@ The base class utility method does not know these types and throws `ClassCastExc
 
 ---
 
+### 8d. Treating Native JSON Text as a Plain String
+
+**DO NOT:**
+```java
+if (value instanceof String) {
+    return JSON.writeValueAsString(value);
+}
+```
+
+This turns a JSON object payload into a quoted JSON string.
+
+**DO:**
+```java
+if (canonicalType == CanonicalType.JSON && value instanceof CharSequence text) {
+    return JSON.writeValueAsString(JSON.readTree(text.toString()));
+}
+```
+
+Branch on both canonical type and runtime value shape. Add driver-facing tests for JSON objects,
+arrays, and scalars; comparing only the textual wrapper is insufficient.
+
+---
+
 ## Moderate Anti-Patterns (May Cause Issues)
 
 ### 8c. Insecure TLS Default (`trustServerCertificate=true`)
@@ -508,10 +532,11 @@ fetchAndProcessRecords(request);
 RecordProcessingResult result = request.getRecordProcessor().completeProcessing();
 result = CutoffTimeSyncUtils.applyCutoffTimeToResult(result, request, cutoffTimeStr);
 
-// The utility handles:
-// - Records with cursor values -> replaces with cutoffTime
-// - Records with null cursor values -> creates end fields from cutoffTime
-// - Zero records -> advances cursor appropriately
+// The shared SDK policy handles:
+// - Initial baseline with records -> persists cutoffTime
+// - Empty initial baseline -> suppresses end cursor and remains initial
+// - Subsequent incremental window -> persists cutoffTime, including zero rows
+// - Cutoff state never carries recordCount
 ```
 
 For other source shapes:
@@ -543,6 +568,14 @@ count-at-boundary path is a compatibility fallback for lower-bound-only sources.
 whose SQL dialect supports both `cursor >= previousCutoff` and `cursor < currentCutoff` must opt
 into the base cutoff-time hook. Its durable `IncrementalField.value` is the current cutoff and its
 `recordCount` is null, so the next read never issues `SELECT COUNT(*) ... WHERE cursor = ?`.
+
+Do not manufacture an end cursor for an empty initial baseline. Advancing before any baseline row
+is materialized can make the next run behave as an incremental-only change/delete pass. The shared
+SDK must suppress that cursor. Connector IT must separately prove:
+
+- empty initial baseline: `endCursorPosition == null`
+- empty subsequent incremental window: end cursor equals the supplied cutoff and
+  `recordCount == null`
 
 **See**: Phase 5 documentation, Step 2 "Choose the Right Incremental Boundary Strategy"
 
@@ -1264,6 +1297,52 @@ if (sourceObj.getCustomAttributes() != null) {
 
 ---
 
+### ANTI-PATTERN: Merging the Raw Stage Without Deterministic Deduplication
+
+**Severity**: CRITICAL
+
+Passing a raw stage table to `MERGE` allows multiple source rows to match one target identity.
+Some warehouses reject the statement; others choose a nondeterministic winner.
+
+Deduplicate by `_supa_id` before `MERGE`. Order descending by selected business cursor fields,
+then `_supa_synced`, then `_supa_index`; without cursor fields, use the latter two. Prove both the
+generated SQL and the live merge path.
+
+---
+
+### ANTI-PATTERN: Treating System-Field Presence as System-Field Correctness
+
+**Severity**: CRITICAL
+
+Finding `_supa_*` names in metadata does not prove the values agree with other destinations.
+Build IT input with the production writer and assert the physical types plus exact values for
+`_supa_synced`, `_supa_deleted`, `_supa_index`, `_supa_id`, and `_supa_job_id`. Connector code
+must not independently generate or redefine them.
+
+---
+
+### ANTI-PATTERN: Treating Test Setup Tokens as Behavioral Evidence
+
+**Severity**: CRITICAL
+
+Creating a callback list, setting `errorPath`, mentioning `CanonicalType`, or importing
+`java.util.concurrent` does not prove callback accounting, error artifacts, an all-types round
+trip, or concurrent cold-schema loading. Assert the produced values and destination state through
+the real execution path. The verifier intentionally requires those assertions rather than token
+presence.
+
+---
+
+### ANTI-PATTERN: Cleaning External Staging Only After Successful Loads
+
+**Severity**: CRITICAL
+
+Success-path prefix cleanup leaves customer data behind when staging, load, or merge fails. Exercise
+a failed live load and prove either immediate job-prefix cleanup or the explicitly documented
+retained-diagnostics state protected by a short lifecycle rule.
+
+---
+
 ## Destination Anti-Patterns Summary
 
 | Anti-Pattern | Severity | Detection Method |
@@ -1278,6 +1357,10 @@ if (sourceObj.getCustomAttributes() != null) {
 | jobContext.toString() for sync_id | HIGH | Code review |
 | Simplified IT test data | HIGH | Code review, CHECK 24 |
 | Not preserving customAttributes | HIGH | Code review |
+| Merging a raw, duplicate stage | CRITICAL | SQL unit test + live merge |
+| Testing only `_supa_*` field presence | CRITICAL | Exact live schema/value assertions |
+| Treating setup tokens as behavioral evidence | CRITICAL | Assertion-level verifier checks |
+| Cleaning external staging only on success | CRITICAL | Failure-path live IT |
 
 ---
 

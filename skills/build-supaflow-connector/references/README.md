@@ -227,7 +227,7 @@ Auto-detected when connector has `REPLICATION_DESTINATION` or `REVERSE_ETL_DESTI
 | 22 | LoadMode handling OR merge_keys (activation) | 7, 8 |
 | 23 | DDL/schema evolution OR error/success processors (activation) | 7, 8 |
 | 24 | Destination integration tests | 7, 8 |
-| 24.5 | Warehouse live IT maturity matrix, row accounting, physical design, retry/logging anchors | 7 |
+| 24.5 | Warehouse live IT maturity matrix plus behavioral evidence for all types, system fields, callback/error artifacts, schema evolution, deterministic merge/delete behavior, physical-design preservation, JSON readback, and external-stage cleanup/cost controls | 7 |
 | 24.6 | Local-agent deployment packaging (`deploy-local-connector`, provided dependency copy) | 1, 7 |
 
 **Note**: Destination connectors must also implement identifier formatting methods from Phase 4 (`getIdentifierFormatter`, `getIdentifierQuoteString`, `getIdentifierSeparator`, `getFullyQualifiedSchemaName`, `getFullyQualifiedTableName`). The pipeline uses them during mapping even for file-based destinations.
@@ -248,6 +248,8 @@ These are mandatory in addition to `verify_connector.sh`:
      count-at-boundary fallback is not sufficient when the database supports `cursor < cutoff`.
    - Cutoff end state stores `value=currentCutoff` with `recordCount=null`; result maximums and
      boundary counts do not control advancement.
+   - Empty initial baselines return no end cursor and remain initial; empty subsequent
+     incremental windows advance to `currentCutoff`.
    - No index-based cursor extraction (`getCursorPosition().get(0)`) in generic templates.
 
 3. **Schema inference consistency**
@@ -255,11 +257,20 @@ These are mandatory in addition to `verify_connector.sh`:
    - If connector-specific heuristics exist, they are documented as post-inference reconciliation, not ad-hoc type guessing everywhere.
 
 4. **Integration test oracle quality**
-   - Incremental IT validates lower/upper bounds and zero-record cursor advancement.
+   - Incremental IT separately validates empty-initial cursor suppression and empty-subsequent
+     cursor advancement, in addition to lower/upper bounds.
    - Record mapping IT validates schema-to-record field coverage, not just non-empty reads.
    - Sparse field-selection IT asserts both presence and absence and exercises initial plus incremental request shapes.
 
 5. **Warehouse destination maturity**
-   - Live IT proves all load modes, destination table handling, schema evolution, row counts, error artifacts, all-type/binary handling, and stage file discovery.
+   - Live IT proves all load modes, destination table handling, additive and type-change schema evolution, callback row counts, read-back error artifacts, all-type/binary handling, and stage file discovery. Holding callbacks in a list or setting `errorPath` is not evidence.
    - Drop/recreate paths preserve destination-owned physical design where applicable.
    - JDBC destinations review retry classification and log enough stage/query/statement context for smoke-test debugging.
+   - A dedicated all-types IT stages, loads, reads back, and exactly compares every canonical
+     value; generic `CanonicalType` usage is not coverage.
+   - Live IT asserts schema and values for all five `_supa_*` fields.
+   - MERGE SQL deterministically chooses same-batch winners by cursor, `_supa_synced`, then
+     `_supa_index`.
+   - Externally staged warehouses define customer-vs-managed storage ownership, least-privilege
+     access, encryption responsibility, normal/failure-path prefix cleanup, and provider-native
+     test-spend limits.

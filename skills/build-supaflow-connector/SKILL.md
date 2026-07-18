@@ -144,6 +144,10 @@ mvn clean install
   cutoff-time window and persist the cutoff without `recordCount`; this includes JDBC connectors,
   which must opt into the base cutoff hook instead of inheriting the count-based fallback. Use
   boundary counts only when the source cannot enforce a reliable upper cutoff.
+- Treat initial and subsequent empty cutoff windows differently. An empty initial baseline MUST
+  return no end cursor so bootstrap remains initial. An empty subsequent incremental window MUST
+  advance to the supplied cutoff with `recordCount == null`. Enforce this in shared SDK behavior
+  and prove both cases in connector IT; do not add a connector-local cursor workaround.
 - Never treat cursor position as a single scalar; respect incremental field structures.
 - Always run cursor identification (`identifyCursorFields()` or equivalent) and lock cursor fields.
 - Treat field selection as a runtime contract. Discovery exposes the full schema, but reads must emit only explicitly selected fields plus required identity, cursor, deletion, and framework fields. Push the projection into the source API when supported, and filter both dlt hints and emitted rows so deselected null columns cannot reappear during normalize.
@@ -154,9 +158,29 @@ mvn clean install
 - Never default `trustServerCertificate=true` for production-facing connectors. Use `false` by default and require explicit opt-in for insecure/dev TLS behavior.
 - Source-only connectors MUST implement stub methods for `mapToTargetObject`, `stage`, and `load` that throw `UnsupportedOperationException` or `ConnectorException` with `UNSUPPORTED_OPERATION`. The interface requires them even if the connector is source-only.
 - For destinations, implement required destination methods and identifier formatter methods expected by mapping/pipeline.
-- JDBC connectors MUST override `convertToCanonicalValue()` to handle database-specific Java types returned by the JDBC driver. Without this, proprietary types (e.g., `microsoft.sql.DateTimeOffset`, `org.postgresql.util.PGobject`) cause ClassCastException at runtime.
+- JDBC source and hybrid connectors MUST override `convertToCanonicalValue()` to handle both
+  database-specific Java classes and canonical-type semantics. In particular, native JSON returned
+  as text must remain a JSON object/array/scalar rather than becoming a quoted JSON string.
+  Exercise the actual driver value shapes for JSON, binary, temporal, array, and struct types.
 - Keep integration tests meaningful: incremental windows, cursor advancement, and schema-to-record field coverage.
 - Every source connector must include a sparse field-selection regression covering initial and incremental reads. Assert that a selected field is present, a known deselected field is absent, and required identity/cursor/system fields remain usable. Python/dlt connectors must exercise `ReadHarness(selected_fields_factory=...)` and verify source/API projection separately with a fake client.
+- Every structured destination must prove the full system-field contract using production writer
+  output: `_supa_synced`, `_supa_deleted`, `_supa_index`, `_supa_id`, and `_supa_job_id` appear
+  exactly once, have destination-appropriate physical types, and retain the shared SDK's exact
+  values. Never recompute or redefine these fields in connector-specific code.
+- Warehouse `MERGE` must deterministically deduplicate a same-batch `_supa_id`: order by selected
+  business cursor fields descending, then `_supa_synced` descending, then `_supa_index`
+  descending. With no cursor, fall back to `_supa_synced`, then `_supa_index`. Prove SQL ordering
+  plus a live merge path.
+- A warehouse all-types round trip means production writer output is staged, loaded, read back,
+  and compared by value for every canonical type, nulls, maximum supported decimal envelopes,
+  temporal precision, JSON semantics, and binary bytes. Separately document fresh-discovery
+  widenings or collapses; do not claim canonical identity when only values are lossless.
+- For externally staged warehouses, decide and document who owns the staging bucket/stage before
+  implementation. Prefer a customer-provided location when staged files contain customer data;
+  preserve customer IAM/encryption controls, use a job-scoped prefix, delete staged objects after
+  terminal success or failure, configure a short lifecycle backstop for interrupted cleanup, and
+  bound live-test spend with provider-native query/job limits and cleanup.
 - For connector docs and marketing, existing clean docs are the template; connector code is only the validation source.
 - For connector docs and marketing, do not put object lists, sync modes, cursor fields, or internal columns in the opening paragraph.
 - For connector docs and marketing, treat protocol details, raw internal identifiers, endpoint paths, API-version/query-shape discussion, and versioned product wording like `v1 connector` as red flags unless the user truly needs them.
@@ -174,6 +198,16 @@ mvn clean install
 - Verification script passes all applicable final-state checks (Python/dlt field-projection gates, or Java checks `1-15`, `25-27`, and source/destination-specific checks; Java destinations also run `16-24` plus maturity and packaging gates).
 - Verification script re-run after integration tests are written (not just at end of build).
 - Field selection is behaviorally proven for initial and incremental reads; accepting a `selected_fields` argument without using it does not satisfy this criterion.
+- Cutoff-state IT proves both empty-initial suppression and empty-incremental advancement.
+- Warehouse IT uses a dedicated all-types test and proves exact values, system fields, and merge
+  winner ordering; a generic `CanonicalType` reference is not evidence.
+- Warehouse IT behaviorally asserts callback counts and reads error artifacts for forced bad rows
+  in moderate and strict modes; collecting callback objects or configuring `errorPath` is not
+  evidence.
+- Warehouse IT proves additive and type-change schema evolution, advertised hard deletes, and
+  user-owned physical-design preservation after destructive load paths.
+- External-stage IT proves normal and failure-path cleanup (or bounded retained diagnostics);
+  cleanup code and lifecycle configuration without execution-path assertions are not evidence.
 - Anti-pattern checks reviewed before final handoff.
 - If the task includes connector docs or marketing, `references/CONNECTOR_DOCS_MARKETING.md` was followed and a red-flag sweep was completed before final handoff.
 - If the task includes connector marketing pages, a template-surface pass was completed to confirm the copy fits the actual renderer and data shape.

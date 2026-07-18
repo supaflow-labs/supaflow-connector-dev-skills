@@ -59,6 +59,19 @@ The base cutoff path then:
 - Advances an empty incremental window to the current cutoff.
 - Preserves empty state for an empty initial baseline.
 
+Treat those last two cases as different invariants:
+
+| Request | Rows | Required end state |
+|---------|------|--------------------|
+| Initial baseline | `> 0` | supplied cutoff, `recordCount == null` |
+| Initial baseline | `0` | no end cursor; bootstrap remains initial |
+| Subsequent incremental | `> 0` | supplied cutoff, `recordCount == null` |
+| Subsequent incremental | `0` | supplied cutoff, `recordCount == null` |
+
+The shared SDK owns the empty-initial suppression. Do not compensate in connector-specific
+`read()` code. Add live connector tests for both empty cases because a non-empty baseline cannot
+prove the bootstrap invariant.
+
 Override `formatCutoffTimeForCursor(...)` only when the database requires connector-specific
 precision or literal formatting. Keep connector-specific prepared-parameter handling in
 `bindPlaceholder(...)` and `bindValue(...)`.
@@ -217,6 +230,8 @@ Every JDBC driver returns proprietary Java objects for database-specific types:
 - **SQL Server**: `microsoft.sql.DateTimeOffset`, `com.microsoft.sqlserver.jdbc.Geometry`
 - **PostgreSQL**: `org.postgresql.util.PGobject`, `org.postgresql.jdbc.PgArray`
 - **Oracle**: `oracle.sql.TIMESTAMP`, `oracle.sql.STRUCT`
+- **BigQuery and other warehouses**: native JSON may be returned as ordinary text; arrays and
+  structs may arrive as `Array`, `Struct`, maps, or driver-specific wrappers
 
 ```java
 @Override
@@ -226,6 +241,11 @@ public String convertToCanonicalValue(Object value, CanonicalType canonicalType)
     }
 
     try {
+        // Preserve JSON semantics when the driver returns native JSON as text.
+        if (canonicalType == CanonicalType.JSON && value instanceof CharSequence text) {
+            return JSON.writeValueAsString(JSON.readTree(text.toString()));
+        }
+
         // Handle driver-specific types by checking the package prefix
         if (value.getClass().getName().startsWith("com.microsoft.sqlserver.")) {
             // DateTimeOffset -> ISO-8601 string
@@ -250,6 +270,16 @@ public String convertToCanonicalValue(Object value, CanonicalType canonicalType)
 ```
 
 **Why this matters**: The base class calls `CanonicalTypeUtil.convertToCanonicalValue()` which expects standard Java types (`String`, `BigDecimal`, `Timestamp`, etc.). When the JDBC driver returns `microsoft.sql.DateTimeOffset` instead of `java.sql.Timestamp`, the utility method does not know how to handle it and throws an exception. Your override intercepts these proprietary types before they reach the utility.
+
+Do not stop at class-package checks. Conversion is a two-dimensional contract:
+
+1. source canonical type (`JSON`, `BINARY`, `INSTANT`, and so on)
+2. actual runtime value shape returned by the selected driver
+
+Use a credential-gated all-types readback test to exercise the real driver. For JSON, compare
+parsed JSON trees so an object, array, number, boolean, or null cannot silently become a quoted
+string. For arrays/structs, preserve element order and field names when the canonical output is
+JSON; document any unsupported nested destination shape separately.
 
 ## What You SHOULD Override
 
@@ -434,8 +464,9 @@ Before proceeding to Phase 6 (integration testing), verify:
 - [ ] Extends `BaseJdbcConnector`
 - [ ] `validateAndSetConnectorProperties()` returns correct `DatasourceConfig`
 - [ ] Time-based cursor strategy is classified; connectors with a reliable SQL upper bound override `useCutoffTimeForTimeBasedCursors()` and do not persist boundary counts
+- [ ] Live cutoff IT proves an empty initial baseline has no end cursor and an empty subsequent incremental window advances exactly to cutoff
 - [ ] `mapTypeByName()` covers all database-specific type names
-- [ ] `convertToCanonicalValue()` handles all proprietary JDBC driver Java types
+- [ ] `convertToCanonicalValue()` handles driver Java types plus canonical JSON/binary/temporal semantics
 - [ ] `checkForKnownExceptions()` covers auth, SSL, and connection errors
 - [ ] If source-only: stubs (`mapToTargetObject`, `stage`, `load`) throw `UnsupportedOperationException` or `UNSUPPORTED_OPERATION`
 - [ ] If source+destination: `getConnectorCapabilities()` includes `REPLICATION_DESTINATION`

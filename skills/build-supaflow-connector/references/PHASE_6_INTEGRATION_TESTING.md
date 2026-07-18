@@ -412,9 +412,15 @@ public class {Name}ConnectorIT {
             syncState != null ? syncState.getEndCursorPosition() : null;
         System.out.println("First sync: " + firstSyncRecords.size() + " records, cursor: " + cursorPosition);
 
-        if (cursorPosition == null || cursorPosition.isEmpty()) {
-            System.out.println("No cursor position returned, skipping incremental test");
+        if (firstSyncRecords.isEmpty()) {
+            assertThat(cursorPosition)
+                .as("An empty initial baseline must remain initial")
+                .isNull();
             return;
+        }
+
+        if (cursorPosition == null || cursorPosition.isEmpty()) {
+            fail("A non-empty bounded initial read must return its cutoff cursor");
         }
 
         String previousCursorValue = cursorPosition.stream()
@@ -462,7 +468,7 @@ public class {Name}ConnectorIT {
                 .isBefore(cutoffTime);
         }
 
-        // Cursor must always advance to end state; zero-record syncs must still advance time-based cursor.
+        // A subsequent incremental window always advances to its cutoff, including zero rows.
         SyncStateResponse secondSyncState = response2.getSyncState();
         assertThat(secondSyncState).as("Second sync must return sync state").isNotNull();
         List<IncrementalField> endCursor = secondSyncState.getEndCursorPosition();
@@ -640,10 +646,18 @@ For at least one incremental object, IT must validate:
 
 1. Lower-bound inclusivity: every incremental record has `cursor >= previousCursor`.
 2. Upper-bound exclusivity: every incremental record has `cursor < cutoffTime`.
-3. Zero-record advancement: when incremental returns no records, end cursor still advances for time-based cursors.
-4. End-state presence: `ReadResponse.syncState.endCursorPosition` is non-null and non-empty after incremental reads.
-5. For a bounded time cursor, end state equals the supplied cutoff exactly and has
+3. Empty initial suppression: a deterministic empty initial table/object returns zero rows and
+   `endCursorPosition == null`, even when the request contains a cutoff.
+4. Empty incremental advancement: a deterministic empty subsequent window advances to the
+   supplied cutoff.
+5. End-state presence: `ReadResponse.syncState.endCursorPosition` is non-null and non-empty after
+   subsequent incremental reads.
+6. For a bounded time cursor, end state equals the supplied cutoff exactly and has
    `recordCount == null`; the test must not accept a maximum returned record value instead.
+
+Do not satisfy both empty cases with one test or an opportunistic account state. Create an empty
+table/object fixture for the initial case and a known no-change half-open window for the subsequent
+case. The verifier treats these as separate behavioral contracts.
 
 ### Field-Selection Test Oracles (Required)
 

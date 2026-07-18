@@ -289,7 +289,8 @@ window connector. This breaks when:
 │  ─────────────────────────────────────────────────────────────────── │
 │  Initial sync:                                                       │
 │    Query:  WHERE cursor_field < cutoffTime                           │
-│    Result: newCursor = cutoffTime                                    │
+│    Result with rows: newCursor = cutoffTime                          │
+│    Result with zero rows: no end cursor; remain initial              │
 │                                                                      │
 │  Incremental sync:                                                   │
 │    Query:  WHERE cursor_field >= prevCursor AND cursor_field < cutoffTime │
@@ -323,10 +324,11 @@ public ReadResponse read(ReadRequest request) throws ConnectorException {
     fetchAndProcessRecords(metadata, request, processor, cutoffTimeStr);
 
     // STEP 3: Apply cutoffTime pattern - THIS IS ALL YOU NEED!
-    // The utility handles:
-    //   - Records with cursor values → replaces with cutoffTime
-    //   - Records with null cursor values → creates end fields from cutoffTime
-    //   - Zero records → advances cursor appropriately
+    // Shared SDK policy handles:
+    //   - Non-empty initial baseline → cutoffTime
+    //   - Empty initial baseline → no end cursor
+    //   - Subsequent incremental window → cutoffTime, including zero rows
+    //   - Cutoff state never carries recordCount
     RecordProcessingResult result = processor.completeProcessing();
     result = CutoffTimeSyncUtils.applyCutoffTimeToResult(result, request, cutoffTimeStr);
 
@@ -908,7 +910,8 @@ public ReadResponse read(ReadRequest request) throws ConnectorException {
 **Key Point**: The cursor handling is identical regardless of API type. The `CutoffTimeSyncUtils.applyCutoffTimeToResult()` method handles:
 - Records with cursor values → replaces with cutoffTime
 - Records with null cursor values → creates end fields from cutoffTime
-- Zero records → advances cursor to cutoffTime (for incremental sync)
+- Empty initial baseline → shared response policy suppresses the end cursor
+- Empty subsequent incremental window → advances to cutoffTime with `recordCount == null`
 
 ---
 
@@ -974,6 +977,8 @@ Before proceeding to Phase 6, confirm ALL of the following:
 | ☐ Pagination handles all pages | Code review |
 | ☐ ReadResponse has correct hasMore | Code review |
 | ☐ ReadResponse has updated cursor position | Code review |
+| ☐ Empty initial baseline has no end cursor | IT with deterministic empty fixture |
+| ☐ Empty subsequent incremental window advances exactly to cutoff with no recordCount | IT |
 | ☐ All object types can be read | Test each type |
 | ☐ CHECK 1, 2, 3, 8 pass | Verification script |
 
@@ -1016,6 +1021,7 @@ Before proceeding to Phase 6, show:
 | **Ignoring connector-configured lookback seconds** | Misses late-arriving data | Pass connector config into `CutoffTimeSyncUtils.buildFiltersWithCutoff(...)`; `ReadRequest` has no lookback getter |
 | **Using raw maxCursorSeen without a boundary strategy** | Breaks on null cursors, equal-cursor bursts, or non-deterministic windows | Use `cutoffTime`, `recordCount`, or `customState.incremental_boundary` based on source behavior |
 | **Manually building cursor position** | Error-prone, inconsistent | Use `CutoffTimeSyncUtils` - it handles all cases |
+| **Advancing an empty initial baseline** | Marks bootstrap complete before any snapshot row exists | Let shared SDK suppress the end cursor; prove it in IT |
 | **Wrong pagination** | Missing data or infinite loops | Match API's actual pagination pattern |
 | **Ignoring historicalSyncStartDate** | Syncs too much data | Apply on initial sync |
 | **hasMore always false** | Breaks continuation | Set based on actual pagination state |

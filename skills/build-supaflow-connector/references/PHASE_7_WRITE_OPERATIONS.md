@@ -21,6 +21,7 @@
 - [Step 4: Implement load()](#step-4-implement-load)
 - [Step 5: Implement executeSqlScript()](#step-5-implement-executesqlscript)
 - [Step 5.5: Propagating Sync Metadata (syncTime, sync_id) Critical](#step-55-propagating-sync-metadata-synctime-sync_id-critical)
+- [Step 5.5.1: Preserve the Shared System-Field Contract](#step-551-preserve-the-shared-system-field-contract)
 - [Step 6: Update ConnectorCapabilities](#step-6-update-connectorcapabilities)
 - [Step 7: Warehouse Destination Maturity Gate](#step-7-warehouse-destination-maturity-gate)
 - [Gate Verification](#gate-verification)
@@ -265,7 +266,8 @@ Maps source object metadata to destination-compatible format.
 3. Normalize identifiers per connector conventions (lowercase, uppercase, etc.)
 
 **YOU MUST NOT:**
-1. Add tracking columns (`_supa_synced`, `_supa_job_id`, `_supa_deleted`)
+1. Add tracking columns (`_supa_synced`, `_supa_deleted`, `_supa_index`, `_supa_id`,
+   `_supa_job_id`)
    - The platform's writer/schema mapper adds these automatically
    - Adding them here will cause duplicates and break schema generation
 
@@ -906,9 +908,37 @@ partitionValues.put("SYNC_ID", syncId);
 
 Without consistent sync metadata:
 - Partitions have inconsistent timestamps
-- `_supa_synced_at` doesn't match actual sync time
-- `sync_id` is random, can't track data lineage
+- `_supa_synced` doesn't match actual sync time
+- `_supa_job_id` is detached from the job, so data lineage is lost
 - Incremental syncs may skip or duplicate data
+
+---
+
+## Step 5.5.1: Preserve the Shared System-Field Contract
+
+The production writer owns all five system fields:
+
+| Field | Required meaning |
+|-------|------------------|
+| `_supa_synced` | Request sync time |
+| `_supa_deleted` | Shared hard-delete marker |
+| `_supa_index` | Shared deterministic input order |
+| `_supa_id` | Shared SDK identity derived from effective primary keys |
+| `_supa_job_id` | Request job details ID |
+
+Destination code maps and loads these fields but MUST NOT generate different values or redefine
+their semantics. Do not copy a hashing algorithm into the loader. Build integration input through
+the production `RecordWritePlan` and writer/system-field enrichment path.
+
+Live IT must assert:
+
+1. all five fields appear exactly once in the physical destination schema;
+2. each has the destination's expected physical type;
+3. a known row has the exact sync time, delete marker, input index, shared `_supa_id`, and job ID;
+4. append, merge/update, and hard-delete paths retain the same identity rules.
+
+Schema-only assertions are insufficient because drift usually occurs while enriching or loading
+values rather than while constructing metadata.
 
 ---
 
@@ -1050,7 +1080,11 @@ For cloud warehouse destinations, create live integration tests that cover:
 3. **Row accounting and error artifacts**
    - Assert `LoadResponse.successCount` and `LoadResponse.errorCount`.
    - Assert callback status row counts, not only the returned response.
+   - Merely collecting `CallbackStatusDto` objects is not evidence. Assert the terminal callback's
+     input, success, and error counts.
    - Force at least one row-level load error in moderate mode and verify the error file contents.
+     Merely setting `errorPath` is not evidence; read the produced artifact and assert the rejected
+     row and error details.
    - Force the same bad row in strict mode and verify load fails before the final merge.
 
 4. **Schema evolution**
@@ -1061,9 +1095,19 @@ For cloud warehouse destinations, create live integration tests that cover:
    - Zero-row and DDL-only paths.
 
 5. **Type parity**
-   - A live all-types round trip for every supported canonical type.
-   - Explicit binary coverage for JSONL/CSV handling (`BINARY`, Base64, destination binary type).
-   - JSON/native semi-structured coverage where the destination has a native type.
+   - Use a dedicated `*AllTypes*IT` so a generic `CanonicalType` reference cannot masquerade as
+     coverage.
+   - Send every canonical type through the production writer, stage, and load path; read values
+     back from the destination and compare exact values.
+   - Cover nulls, maximum supported decimal precision/scale, microsecond-or-better temporal
+     precision where supported, Unicode/control characters, and explicit binary bytes.
+   - Compare parsed JSON values for objects, arrays, and scalars; textual wrapper equality does
+     not catch double serialization.
+   - For a hybrid JDBC connector, perform readback through the connector source path as well as
+     physical destination assertions so actual driver value shapes are exercised.
+   - Maintain a separate discovery-mapping test for canonical-to-native and native-to-canonical
+     mappings. Document honest widenings/collapses such as `INT -> INT64 -> LONG`; value stability
+     does not imply canonical-type identity.
 
 6. **Stage file handling**
    - Production file names: `success_part_*` with the expected extension for the writer format.
@@ -1072,8 +1116,16 @@ For cloud warehouse destinations, create live integration tests that cover:
    - Empty non-zero load rejection and zero-row load success.
 
 7. **Merge edge cases**
-   - Same-batch duplicate primary keys.
+   - Same-batch duplicate primary keys with a deterministic winner. Partition stage rows by
+     `_supa_id`; order by selected business cursor fields descending, then `_supa_synced`
+     descending, then `_supa_index` descending. Without cursor fields, use `_supa_synced` then
+     `_supa_index`.
+   - Prove the generated SQL ordering in a unit test and execute the live merge path with
+     duplicate identities. This avoids warehouse-specific multi-match failures and cross-
+     connector winner drift.
    - Hard-delete markers if `supportsHardDeletes(true)`.
+     Write `_supa_deleted=true` through the production path and query the destination to prove the
+     target row is absent. SQL text containing a delete clause is not live behavior evidence.
    - Windowed replace if the connector exposes replacement windows.
 
 8. **Concurrent cold-schema first load**
@@ -1090,7 +1142,34 @@ Examples:
 - Redshift: preserve existing `DISTKEY` and `SORTKEY` on `OVERWRITE`, first-run `DROP`, or other drop-before-rename paths.
 - Warehouses with clustering/partitioning: preserve supported clustering or partition hints when the destination table already has them.
 
+The live test must create user-owned physical design, execute the destructive path, and read the
+design back afterward. A connector-created default clustering/partition key, or the mere presence
+of physical-design code, does not prove preservation.
+
 If a preserved key column no longer exists in the new schema, skip that specific key with a warning. Do not fail the sync solely because an optional physical-design hint points at a removed or unsupported column.
+
+### External Stage Ownership, Security, and Test Cost
+
+For warehouses that load through object storage, make the staging trust boundary an explicit
+design decision before coding:
+
+- Prefer a customer-provided bucket/container when files contain customer data. This lets the
+  customer retain IAM, encryption/CMEK, retention, audit, and network controls.
+- Scope permissions to the configured bucket and job-specific prefix. Do not require project-wide
+  storage administration.
+- Use collision-resistant job prefixes and delete staged objects after terminal success or
+  failure. Configure a short lifecycle backstop for process interruption or explicitly retained
+  failure diagnostics. Live IT must assert normal-path prefix cleanup and exercise a failed load:
+  either assert immediate prefix cleanup or assert the documented retained-diagnostics state and
+  bounded lifecycle. Unit tests must validate any required lifecycle rule.
+- Do not silently fall back to a Supaflow-managed bucket. A managed option requires a separate
+  documented ownership, encryption, retention, incident-response, and deletion model.
+- Bound live-test spend with provider-native controls: maximum bytes billed/query, job timeout,
+  table/dataset expiration, narrow fixtures, and deterministic cleanup. Never rely only on billing
+  alerts because they do not stop queries.
+
+Record the required data-warehouse and object-storage permissions separately so users can apply
+least privilege.
 
 ### Retry Classification for JDBC Destinations
 
@@ -1220,6 +1299,10 @@ bash <skill-root>/scripts/verify_connector.sh {name} <platform-root>
 | ☐ stage() returns valid StageResponse | Code review |
 | ☐ load() handles all LoadModes | Code review |
 | ☐ load() handles DDL-only and zero-rows | Code review |
+| ☐ Dedicated live all-types test proves exact write/read values and discovery widenings | Test |
+| ☐ All five `_supa_*` fields have exact live schema and value assertions | Test |
+| ☐ MERGE dedup ordering is cursor → sync time → input index | SQL unit test + live merge |
+| ☐ External stage ownership, least privilege, cleanup, and test cost limits are explicit | Design + IT |
 | ☐ executeSqlScript() works (if JDBC) | Test |
 | ☐ ConnectorCapabilities includes DESTINATION | Code review |
 | ☐ Identifier formatter methods implemented (no UnsupportedOperationException) | Code review |
@@ -1314,6 +1397,7 @@ Once all verification checks pass:
 private String buildMergeSql(ObjectMetadata stageMetadata, ObjectMetadata targetMetadata) {
     String targetFqn = getFullyQualifiedName(targetMetadata);
     String stageFqn = getFullyQualifiedName(stageMetadata) + "_STAGE";
+    String deduplicatedSource = buildDeduplicatedSourceSql(stageFqn, stageMetadata);
 
     // Get primary key fields for join condition
     List<String> pkFields = stageMetadata.getFields().stream()
@@ -1350,11 +1434,16 @@ private String buildMergeSql(ObjectMetadata stageMetadata, ObjectMetadata target
 
     return String.format(
         "MERGE INTO %s AS target " +
-        "USING %s AS source " +
+        "USING (%s) AS source " +
         "ON (%s) " +
         "WHEN MATCHED THEN UPDATE SET %s " +
         "WHEN NOT MATCHED THEN INSERT (%s) VALUES (%s)",
-        targetFqn, stageFqn, onClause, updateClause, insertColumns, insertValues
+        targetFqn, deduplicatedSource, onClause, updateClause, insertColumns, insertValues
     );
 }
 ```
+
+`buildDeduplicatedSourceSql(...)` must select one row per `_supa_id` using the connector's window
+syntax and the required cursor → `_supa_synced` → `_supa_index` ordering. Do not feed a raw stage
+table to `MERGE`; BigQuery and other warehouses can reject multiple source matches, while engines
+that accept them may choose a nondeterministic winner.

@@ -64,6 +64,65 @@ echo ""
 
 ERRORS=0
 WARNINGS=0
+JAVA_EVIDENCE_VERIFIER="$SCRIPT_DIR/verify_java_contract_evidence.py"
+
+run_java_evidence_check() {
+    local check_name="$1"
+    local success_message="$2"
+    local output
+    local failure_count
+
+    if output=$(python3 "$JAVA_EVIDENCE_VERIFIER" \
+            "$check_name" "$CONNECTOR_NAME" "$PLATFORM_ROOT" 2>&1); then
+        echo "✓ $success_message"
+        return
+    fi
+
+    printf '%s\n' "$output" | sed 's/^FAIL: /❌ ERROR: /'
+    failure_count=$(printf '%s\n' "$output" | grep -c '^FAIL:' || true)
+    if [ "$failure_count" -eq 0 ]; then
+        failure_count=1
+    fi
+    ERRORS=$((ERRORS + failure_count))
+}
+
+resolve_java_string_return() {
+    local method_name="$1"
+    local return_expression
+    local constant_name
+    local constant_class
+    local constant_file
+    local resolved
+
+    return_expression=$(grep -A4 "public String ${method_name}()" "$CONNECTOR_FILE" \
+        | grep 'return' | head -1 \
+        | sed 's/.*return[[:space:]]*//; s/[[:space:]]*;.*//')
+    if [[ "$return_expression" =~ ^\"([^\"]*)\"$ ]]; then
+        printf '%s' "${BASH_REMATCH[1]}"
+        return
+    fi
+
+    constant_name="${return_expression##*.}"
+    constant_class=""
+    if [[ "$return_expression" == *.* ]]; then
+        constant_class="${return_expression%.*}"
+    fi
+
+    if [[ -n "$constant_class" ]]; then
+        constant_file=$(find "$CONNECTOR_CLASS_DIR" -name "${constant_class}.java" -print -quit)
+    fi
+    if [[ -z "$constant_file" ]]; then
+        constant_file=$(grep -Rl --include="*.java" \
+            "static final String[[:space:]]*${constant_name}[[:space:]]*=" \
+            "$CONNECTOR_CLASS_DIR" 2>/dev/null | head -1)
+    fi
+    if [[ -n "$constant_file" ]]; then
+        resolved=$(grep \
+            "static final String[[:space:]]*${constant_name}[[:space:]]*=" \
+            "$constant_file" | head -1 | sed 's/.*=[[:space:]]*"\([^"]*\)".*/\1/')
+        printf '%s' "$resolved"
+    fi
+}
 
 # Detect connector type (JDBC vs REST)
 IS_JDBC_CONNECTOR=false
@@ -74,17 +133,44 @@ if grep -q "extends BaseJdbcConnector" "$CONNECTOR_FILE"; then
     echo ""
 fi
 
-# Detect connector capabilities (SOURCE / DESTINATION / DUAL-PURPOSE)
-IS_SOURCE_CONNECTOR=false
-IS_DESTINATION_CONNECTOR_EARLY=false
-
-if grep -q "REPLICATION_SOURCE" "$CONNECTOR_FILE"; then
-    IS_SOURCE_CONNECTOR=true
+# Detect connector capabilities from active method bodies. Raw grep is unsafe:
+# commented-out capabilities previously classified Snowflake as source+activation.
+if ! CLASSIFICATION_OUTPUT=$(python3 "$JAVA_EVIDENCE_VERIFIER" \
+        classify "$CONNECTOR_NAME" "$PLATFORM_ROOT" 2>&1); then
+    echo "❌ ERROR: Could not classify connector capabilities"
+    printf '%s\n' "$CLASSIFICATION_OUTPUT"
+    exit 1
 fi
 
-if grep -q "REPLICATION_DESTINATION\|REVERSE_ETL_DESTINATION" "$CONNECTOR_FILE"; then
-    IS_DESTINATION_CONNECTOR_EARLY=true
-fi
+classification_value() {
+    local key="$1"
+    printf '%s\n' "$CLASSIFICATION_OUTPUT" \
+        | awk -F= -v key="$key" '$1 == key { print $2; exit }'
+}
+
+IS_SOURCE_CONNECTOR=$(classification_value source)
+IS_DESTINATION_CONNECTOR_EARLY=$(classification_value destination)
+IS_ACTIVATION_DESTINATION=$(classification_value activation)
+IS_WAREHOUSE_DESTINATION=$(classification_value warehouse)
+IS_DIRECT_DATABASE_DESTINATION=$(classification_value direct)
+HAS_INVALID_READ_CAPABILITY=$(classification_value invalid_read)
+HAS_INVALID_WRITE_CAPABILITY=$(classification_value invalid_write)
+HAS_INVALID_SCHEMA_DISCOVERY_CAPABILITY=$(classification_value invalid_schema_discovery)
+
+for classification_flag in \
+    IS_SOURCE_CONNECTOR \
+    IS_DESTINATION_CONNECTOR_EARLY \
+    IS_ACTIVATION_DESTINATION \
+    IS_WAREHOUSE_DESTINATION \
+    IS_DIRECT_DATABASE_DESTINATION \
+    HAS_INVALID_READ_CAPABILITY \
+    HAS_INVALID_WRITE_CAPABILITY \
+    HAS_INVALID_SCHEMA_DISCOVERY_CAPABILITY; do
+    if [[ "${!classification_flag}" != "true" && "${!classification_flag}" != "false" ]]; then
+        echo "❌ ERROR: Incomplete connector classification: $classification_flag"
+        exit 1
+    fi
+done
 
 # Display connector purpose
 if $IS_SOURCE_CONNECTOR && $IS_DESTINATION_CONNECTOR_EARLY; then
@@ -568,27 +654,27 @@ echo "━━━━━━━━━━━━━━━━━━━━━━━━�
 echo "✓ CHECK 5: Connector Capabilities"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
-if grep -q "ConnectorCapabilities\.READ\b" "$CONNECTOR_FILE"; then
+if $HAS_INVALID_READ_CAPABILITY; then
     echo "❌ ERROR: Using ConnectorCapabilities.READ"
     echo "   → WRONG: ConnectorCapabilities.READ (doesn't exist)"
     echo "   → CORRECT: ConnectorCapabilities.REPLICATION_SOURCE"
     ERRORS=$((ERRORS + 1))
 fi
 
-if grep -q "ConnectorCapabilities\.WRITE\b" "$CONNECTOR_FILE"; then
+if $HAS_INVALID_WRITE_CAPABILITY; then
     echo "❌ ERROR: Using ConnectorCapabilities.WRITE"
     echo "   → WRONG: ConnectorCapabilities.WRITE (doesn't exist)"
     echo "   → CORRECT: ConnectorCapabilities.REPLICATION_DESTINATION"
     ERRORS=$((ERRORS + 1))
 fi
 
-if grep -q "ConnectorCapabilities\.SCHEMA_DISCOVERY" "$CONNECTOR_FILE"; then
+if $HAS_INVALID_SCHEMA_DISCOVERY_CAPABILITY; then
     echo "❌ ERROR: Using ConnectorCapabilities.SCHEMA_DISCOVERY"
     echo "   → This capability doesn't exist, remove it"
     ERRORS=$((ERRORS + 1))
 fi
 
-if grep -q "REPLICATION_SOURCE\|REPLICATION_DESTINATION" "$CONNECTOR_FILE"; then
+if $IS_SOURCE_CONNECTOR || $IS_DESTINATION_CONNECTOR_EARLY; then
     echo "✓ Using correct capability enums"
 fi
 
@@ -713,6 +799,9 @@ if $IS_JDBC_CONNECTOR; then
             && grep -A4 "useCutoffTimeForTimeBasedCursors" "$CONNECTOR_FILE" | grep -q "return true"; then
         echo "✓ JDBC connector opts time-based cursors into cutoff-time windows"
         echo "✓ Cutoff state bypasses result maximums and boundary-count queries"
+        run_java_evidence_check \
+            "cutoff-state" \
+            "IT separately proves empty-initial suppression and empty-incremental advancement"
     else
         echo "⚠️  WARNING: JDBC connector uses the count-at-boundary fallback"
         echo "   → Confirm the source cannot enforce cursor < cutoffTime"
@@ -735,6 +824,12 @@ elif grep -q "identifyCursorFields\|setSourceCursorField\|setCursorField\|SyncSt
 
     if grep -q "getServerTimeOffset" "$CONNECTOR_FILE"; then
         echo "✓ Found getServerTimeOffset() implementation (cutoff time strategy)"
+    fi
+
+    if grep -q "CutoffTimeSyncUtils\|getCutoffTime" "$CONNECTOR_FILE"; then
+        run_java_evidence_check \
+            "cutoff-state" \
+            "IT separately proves empty-initial suppression and empty-incremental advancement"
     fi
 
     if grep -q "lookback" "$CONNECTOR_FILE"; then
@@ -822,16 +917,8 @@ echo "━━━━━━━━━━━━━━━━━━━━━━━━�
 echo "✓ CHECK 11: Naming Conventions"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
-# Extract getType() return value
-CONNECTOR_TYPE=$(grep -A2 'public String getType()' "$CONNECTOR_FILE" | grep 'return' | sed 's/.*return[[:space:]]*"\([^"]*\)".*/\1/' | head -1)
-
-# Also check for constant reference (e.g., return CONNECTOR_ID)
-if [[ -z "$CONNECTOR_TYPE" ]] || [[ "$CONNECTOR_TYPE" == *"return"* ]]; then
-    CONSTANT_NAME=$(grep -A2 'public String getType()' "$CONNECTOR_FILE" | grep 'return' | sed 's/.*return[[:space:]]*\([A-Z_]*\);.*/\1/' | head -1)
-    if [[ -n "$CONSTANT_NAME" ]]; then
-        CONNECTOR_TYPE=$(grep "private static final String $CONSTANT_NAME" "$CONNECTOR_FILE" | sed 's/.*=.*"\([^"]*\)".*/\1/')
-    fi
-fi
+# Extract getType() return value, including constants in helper classes.
+CONNECTOR_TYPE=$(resolve_java_string_return "getType")
 
 if [[ -n "$CONNECTOR_TYPE" ]]; then
     echo "  getType() returns: \"$CONNECTOR_TYPE\""
@@ -863,16 +950,8 @@ else
     WARNINGS=$((WARNINGS + 1))
 fi
 
-# Extract getName() return value
-CONNECTOR_DISPLAY_NAME=$(grep -A2 'public String getName()' "$CONNECTOR_FILE" | grep 'return' | sed 's/.*return[[:space:]]*"\([^"]*\)".*/\1/' | head -1)
-
-# Also check for constant reference
-if [[ -z "$CONNECTOR_DISPLAY_NAME" ]] || [[ "$CONNECTOR_DISPLAY_NAME" == *"return"* ]]; then
-    CONSTANT_NAME=$(grep -A2 'public String getName()' "$CONNECTOR_FILE" | grep 'return' | sed 's/.*return[[:space:]]*\([A-Z_]*\);.*/\1/' | head -1)
-    if [[ -n "$CONSTANT_NAME" ]]; then
-        CONNECTOR_DISPLAY_NAME=$(grep "private static final String $CONSTANT_NAME" "$CONNECTOR_FILE" | sed 's/.*=.*"\([^"]*\)".*/\1/')
-    fi
-fi
+# Extract getName() return value, including constants in helper classes.
+CONNECTOR_DISPLAY_NAME=$(resolve_java_string_return "getName")
 
 if [[ -n "$CONNECTOR_DISPLAY_NAME" ]]; then
     echo "  getName() returns: \"$CONNECTOR_DISPLAY_NAME\""
@@ -928,7 +1007,6 @@ echo "  Icon Check:"
 # Derive expected icon filename from connector name
 if [[ -n "$CONNECTOR_DISPLAY_NAME" ]]; then
     ICON_FOUND=""
-    ICON_BUNDLED=""
     ICON_NAME_DISPLAY=$(echo "$CONNECTOR_DISPLAY_NAME" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/_/g' | sed 's/__*/_/g' | sed 's/^_//; s/_$//')
     ICON_NAME_DISPLAY_SIMPLE=$(echo "$CONNECTOR_DISPLAY_NAME" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]//g')
     ICON_PATH_ARTIFACT="../supaflow-www/public/connectors/${CONNECTOR_NAME}.svg"
@@ -937,11 +1015,9 @@ if [[ -n "$CONNECTOR_DISPLAY_NAME" ]]; then
 
     if find "$CONNECTOR_DIR/src/main/resources" -name "*.svg" -print -quit 2>/dev/null | grep -q .; then
         echo "✓ Found bundled SVG icon in connector resources"
-        ICON_BUNDLED="yes"
         ICON_FOUND="yes"
     elif grep -rq "<svg\|getResourceAsStream\|Base64\|ICON" "$CONNECTOR_SRC_DIR" --include="*.java" 2>/dev/null; then
         echo "✓ Found getIcon() bundled/embedded icon implementation"
-        ICON_BUNDLED="yes"
         ICON_FOUND="yes"
     fi
 
@@ -1199,47 +1275,47 @@ if [[ -n "$IT_TEST_FILE" ]]; then
     echo "✓ Found IT test file(s): $IT_TEST_COUNT"
     echo "   Primary file: $(basename "$IT_TEST_FILE")"
 
-    # Check for required test annotations
+    # Ordered/shared-instance annotations are optional for self-contained ITs.
     if grep -R -q --include="*IT.java" "@TestInstance.*PER_CLASS" "$CONNECTOR_DIR/src/test"; then
         echo "✓ Has @TestInstance(PER_CLASS) annotation"
     else
-        echo "⚠️  WARNING: Missing @TestInstance(Lifecycle.PER_CLASS)"
-        WARNINGS=$((WARNINGS + 1))
+        echo "ℹ️  No shared JUnit test instance (valid for self-contained ITs)"
     fi
 
     if grep -R -q --include="*IT.java" "@TestMethodOrder" "$CONNECTOR_DIR/src/test"; then
         echo "✓ Has @TestMethodOrder annotation"
     else
-        echo "⚠️  WARNING: Missing @TestMethodOrder(OrderAnnotation.class)"
-        WARNINGS=$((WARNINGS + 1))
+        echo "ℹ️  No ordered JUnit execution (valid for self-contained ITs)"
     fi
 
-    # Check for required tests
-    if grep -R -q --include="*IT.java" "testConnectorInitialized\|testInit\|testConnection" "$CONNECTOR_DIR/src/test"; then
+    # Check behavior rather than requiring test-name prefixes.
+    if grep -R -q --include="*IT.java" "\.init[[:space:]]*(" "$CONNECTOR_DIR/src/test"; then
         echo "✓ Has initialization test"
     else
-        echo "⚠️  WARNING: Missing initialization test (expected: testInit, testConnection, or testConnectorInitialized)"
+        echo "⚠️  WARNING: Missing live connector.init(...) coverage"
         WARNINGS=$((WARNINGS + 1))
     fi
 
-    if grep -R -q --include="*IT.java" "testListObjects\|testSchemaDiscovery\|testSchema" "$CONNECTOR_DIR/src/test"; then
+    if grep -R -q --include="*IT.java" "\.schema[[:space:]]*(" "$CONNECTOR_DIR/src/test"; then
         echo "✓ Has schema discovery test"
     else
-        echo "⚠️  WARNING: Missing schema discovery test (expected: testSchema, testSchemaDiscovery, or testListObjects)"
+        echo "⚠️  WARNING: Missing live connector.schema(...) coverage"
         WARNINGS=$((WARNINGS + 1))
     fi
 
-    if grep -R -q --include="*IT.java" "testReadData\|testRead\|testReadReturns" "$CONNECTOR_DIR/src/test"; then
+    if grep -R -q --include="*IT.java" "\.read[[:space:]]*(" "$CONNECTOR_DIR/src/test"; then
         echo "✓ Has read data test"
     else
-        echo "⚠️  WARNING: Missing read data test (expected: testRead, testReadData, or testReadReturns)"
+        echo "⚠️  WARNING: Missing live connector.read(...) coverage"
         WARNINGS=$((WARNINGS + 1))
     fi
 
-    if grep -R -q --include="*IT.java" "testCursorTracking\|testIncremental\|testCursor" "$CONNECTOR_DIR/src/test"; then
+    if grep -R -q --include="*IT.java" \
+            "initialSync(false)\|cursorPosition\|assertCutoffState" \
+            "$CONNECTOR_DIR/src/test"; then
         echo "✓ Has cursor tracking test"
     else
-        echo "⚠️  WARNING: Missing cursor tracking test (expected: testCursor, testCursorTracking, or testIncremental)"
+        echo "⚠️  WARNING: Missing behavioral incremental cursor coverage"
         WARNINGS=$((WARNINGS + 1))
     fi
 
@@ -1275,7 +1351,9 @@ if $IS_JDBC_CONNECTOR; then
     echo "ℹ️  Detected BaseJdbcConnector subclass"
     echo ""
 
-    if grep -rq "convertToCanonicalValue" "$CONNECTOR_SRC_DIR" 2>/dev/null; then
+    if ! $IS_SOURCE_CONNECTOR; then
+        echo "ℹ️  Skipping source-side canonical conversion check for destination-only JDBC connector"
+    elif grep -rq "convertToCanonicalValue" "$CONNECTOR_SRC_DIR" 2>/dev/null; then
         echo "✓ Has convertToCanonicalValue override (handles driver-specific types)"
     else
         echo "⚠️  WARNING: Missing convertToCanonicalValue override"
@@ -1322,30 +1400,16 @@ if $IS_DESTINATION_CONNECTOR; then
     echo "ℹ️  Detected: Connector has REPLICATION_DESTINATION capability"
     echo ""
 
-    # Detect destination type: staged warehouse/file, direct database, or activation.
-    IS_WAREHOUSE_DESTINATION=false
-    IS_DIRECT_DATABASE_DESTINATION=false
-    IS_ACTIVATION_DESTINATION=false
-
-    # Check for stage() implementation
-    STAGE_METHOD=$(grep -A5 "public.*StageResponse stage" "$CONNECTOR_FILE" 2>/dev/null || true)
-    if grep -rq "getActivationTarget\|activationTarget\|REVERSE_ETL_DESTINATION" "$CONNECTOR_SRC_DIR" 2>/dev/null; then
-        IS_ACTIVATION_DESTINATION=true
+    # Report the type derived from active capabilities/configuration method bodies.
+    if $IS_ACTIVATION_DESTINATION; then
         echo "ℹ️  Destination Type: ACTIVATION (API-based, no staging)"
-    elif [[ -n "$STAGE_METHOD" ]]; then
-        if echo "$STAGE_METHOD" | grep -q "UnsupportedOperationException\|UNSUPPORTED_OPERATION\|throw new"; then
-            IS_ACTIVATION_DESTINATION=true
-            echo "ℹ️  Destination Type: ACTIVATION (API-based, no staging)"
-        elif grep -q "StageResponse.noOp" "$CONNECTOR_FILE" || grep -q "requiresStaging(false)" "$CONNECTOR_FILE"; then
-            IS_DIRECT_DATABASE_DESTINATION=true
-            echo "ℹ️  Destination Type: DIRECT DATABASE (no external staging, explicit load)"
-        else
-            IS_WAREHOUSE_DESTINATION=true
-            echo "ℹ️  Destination Type: STAGED WAREHOUSE/FILE (staging + load)"
-        fi
-    else
-        IS_WAREHOUSE_DESTINATION=true
+    elif $IS_DIRECT_DATABASE_DESTINATION; then
+        echo "ℹ️  Destination Type: DIRECT DATABASE (no external staging, explicit load)"
+    elif $IS_WAREHOUSE_DESTINATION; then
         echo "ℹ️  Destination Type: STAGED WAREHOUSE/FILE (staging + load)"
+    else
+        echo "⚠️  WARNING: Destination type could not be determined from capabilities config"
+        WARNINGS=$((WARNINGS + 1))
     fi
     echo ""
 
@@ -1803,10 +1867,10 @@ if $IS_DESTINATION_CONNECTOR; then
         echo "✓ CHECK 20: Staging Load Implementation"
         echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
-        if grep -rq "COPY INTO\|executeCopyInto\|copyInto" "$CONNECTOR_SRC_DIR" 2>/dev/null; then
+        if grep -rq "COPY INTO\|executeCopyInto\|copyInto\|JobConfiguration\.Load" "$CONNECTOR_SRC_DIR" 2>/dev/null; then
             echo "✓ Found COPY INTO implementation"
         else
-            if grep -rq "uploadToStage\|PUT.*stage\|stageLocation" "$CONNECTOR_SRC_DIR" 2>/dev/null; then
+            if grep -rq "uploadToStage\|PUT.*stage\|stageLocation\|GcsStager\|S3Stager\|storage\.create\|writeChannel" "$CONNECTOR_SRC_DIR" 2>/dev/null; then
                 echo "✓ Found staging upload implementation"
             else
                 echo "⚠️  WARNING: No COPY INTO or staging implementation found"
@@ -1821,7 +1885,7 @@ if $IS_DESTINATION_CONNECTOR; then
         echo "✓ CHECK 21: MERGE Implementation"
         echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
-        if grep -rq "MERGE INTO\|executeMerge\|buildMergeSql" "$CONNECTOR_SRC_DIR" 2>/dev/null; then
+        if grep -rq "MERGE INTO\|executeMerge\|buildMergeSql\|mergeSql\|append(\"MERGE" "$CONNECTOR_SRC_DIR" 2>/dev/null; then
             echo "✓ Found MERGE implementation"
         else
             echo "⚠️  WARNING: No MERGE implementation found"
@@ -1866,14 +1930,14 @@ if $IS_DESTINATION_CONNECTOR; then
         echo "✓ CHECK 23: DDL Generation"
         echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
-        if grep -rq "CREATE TABLE\|createTable\|buildCreateTableSql" "$CONNECTOR_SRC_DIR" 2>/dev/null; then
+        if grep -rq "CREATE TABLE\|createTable\|buildCreateTableSql\|create(TableInfo\|create(DatasetInfo" "$CONNECTOR_SRC_DIR" 2>/dev/null; then
             echo "✓ Found CREATE TABLE implementation"
         else
             echo "⚠️  WARNING: No CREATE TABLE implementation found"
             WARNINGS=$((WARNINGS + 1))
         fi
 
-        if grep -rq "ALTER TABLE\|alterTable\|buildAlterTableSql" "$CONNECTOR_SRC_DIR" 2>/dev/null; then
+        if grep -rq "ALTER TABLE\|alterTable\|buildAlterTableSql\|update(table\.toBuilder\|bigQuery\.update" "$CONNECTOR_SRC_DIR" 2>/dev/null; then
             echo "✓ Found ALTER TABLE implementation (schema evolution)"
         else
             echo "ℹ️  No ALTER TABLE found (may not support schema evolution)"
@@ -1900,8 +1964,10 @@ if $IS_DESTINATION_CONNECTOR; then
         fi
 
         # CRITICAL: Check for realistic test data (not simplified)
-        if grep -R -q --include="*IT.java" "success_part_" "$CONNECTOR_DIR/src/test"; then
-            echo "✓ Uses realistic success_part_* file patterns"
+        if grep -R -q --include="*IT.java" --include="*Test.java" \
+                "success_part_\|StagedFiles\.SUCCESS_PART_PREFIX" \
+                "$CONNECTOR_DIR/src/test"; then
+            echo "✓ Test coverage uses realistic success_part_* file patterns"
         else
             echo "⚠️  WARNING: IT tests may use simplified CSV file names"
             echo "   → Should use production patterns: success_part_*.csv or success_part_*.jsonl"
@@ -1989,60 +2055,13 @@ if $IS_DESTINATION_CONNECTOR; then
                 WARNINGS=$((WARNINGS + 1))
             fi
 
-            if grep -R -q --include="*IT.java" "CallbackStatusDto\|CallbackStatus" "$CONNECTOR_DIR/src/test" 2>/dev/null \
-                && grep -R -q --include="*IT.java" "inputRowCount\|successRowCount\|errorRowCount\|getSuccessCount\|getErrorCount\|assertCounts" "$CONNECTOR_DIR/src/test" 2>/dev/null \
-                && grep -R -q --include="*IT.java" "errorPath\|error.csv\|Files.readString" "$CONNECTOR_DIR/src/test" 2>/dev/null; then
-                echo "✓ IT asserts callback row counts and error artifact output"
-            else
-                echo "❌ ERROR: Destination IT must assert callback success/error counts and error artifacts"
-                echo "   → LoadResponse counts alone are not enough; callback status drives orchestration progress"
-                ERRORS=$((ERRORS + 1))
-            fi
+            run_java_evidence_check \
+                "warehouse" \
+                "Behavioral warehouse evidence covers types, system fields, callbacks, error artifacts, schema evolution, merge/delete semantics, physical design, concurrent cold starts, JSON readback, and external-stage safety"
 
-            if grep -R -q --include="*IT.java" "SchemaEvolution\|schema evolution\|ALTER TABLE\|add column\|type change\|changed columns" "$CONNECTOR_DIR/src/test" 2>/dev/null; then
-                echo "✓ IT covers schema evolution DDL"
-            else
-                echo "❌ ERROR: Destination IT missing schema evolution coverage"
-                echo "   → Test add-column and type-change paths, not only initial table creation"
-                ERRORS=$((ERRORS + 1))
-            fi
-
-            if grep -R -q --include="*IT.java" "AllTypes\|all-types\|every supported canonical type\|CanonicalType" "$CONNECTOR_DIR/src/test" 2>/dev/null; then
-                echo "✓ IT covers all-type round trip"
-            else
-                echo "❌ ERROR: Destination IT missing all-type round-trip coverage"
-                echo "   → Canonical-to-native mapping must be proven against the live destination"
-                ERRORS=$((ERRORS + 1))
-            fi
-
-            if grep -R -q --include="*IT.java" "BINARY\|VARBYTE\|base64\|binary" "$CONNECTOR_DIR/src/test" 2>/dev/null; then
-                echo "✓ IT covers binary payload handling"
-            else
-                echo "❌ ERROR: Destination IT missing binary handling coverage"
-                echo "   → JSONL/CSV binary handling commonly differs from scalar type handling"
-                ERRORS=$((ERRORS + 1))
-            fi
-
-            if grep -R -q --include="*IT.java" "concurrent\|parallel\|ExecutorService\|CompletableFuture\|CountDownLatch\|cold schema\|first-load\|pg_namespace" "$CONNECTOR_DIR/src/test" 2>/dev/null; then
-                echo "✓ IT covers concurrent cold-schema first-load behavior"
-            else
-                echo "⚠️  WARNING: Destination IT missing concurrent cold-schema first-load coverage"
-                echo "   → Run 2+ first-load objects into a brand-new schema in parallel and assert no duplicate namespace/key race"
-                WARNINGS=$((WARNINGS + 1))
-            fi
         else
             echo "⚠️  WARNING: No IT tests found, skipping warehouse maturity matrix"
             WARNINGS=$((WARNINGS + 1))
-        fi
-
-        if grep -rq "DROP TABLE\|RENAME TO\|ALTER TABLE .* RENAME\|LoadMode.OVERWRITE" "$CONNECTOR_SRC_DIR" --include="*.java" 2>/dev/null; then
-            if grep -rq "PhysicalDesign\|physical design\|DISTKEY\|SORTKEY\|CLUSTER\|PARTITION" "$CONNECTOR_SRC_DIR" --include="*.java" 2>/dev/null; then
-                echo "✓ Drop/recreate paths preserve destination physical design where applicable"
-            else
-                echo "⚠️  WARNING: Drop/recreate paths found without physical-design preservation hooks"
-                echo "   → Preserve user-owned destination hints such as Redshift DISTKEY/SORTKEY or clustering"
-                WARNINGS=$((WARNINGS + 1))
-            fi
         fi
 
         if grep -rq "copyQueryId\|queryId\|stageLocation\|statement.*failed\|failed.*statement\|statementIndex" "$CONNECTOR_SRC_DIR" --include="*.java" 2>/dev/null; then
@@ -2054,9 +2073,9 @@ if $IS_DESTINATION_CONNECTOR; then
         fi
 
         if $IS_JDBC_CONNECTOR; then
-            if grep -rq "isRetryableException" "$CONNECTOR_SRC_DIR" --include="*.java" 2>/dev/null; then
-                echo "✓ JDBC destination overrides retry classification"
-                if grep -R -q --include="*Test.java" --include="*IT.java" "isRetryableException\|retryable\|not retryable\|Query reached usage limit\|timeout\|cancel" "$CONNECTOR_DIR/src/test" 2>/dev/null; then
+            if grep -rq "isRetryableException\|isRetryable\|isRetriable" "$CONNECTOR_SRC_DIR" --include="*.java" 2>/dev/null; then
+                echo "✓ Destination has connector-specific retry classification"
+                if grep -R -q --include="*Test.java" --include="*IT.java" "isRetryableException\|isRetryable\|isRetriable\|retryable\|retriable\|not retryable\|not retriable\|Query reached usage limit\|timeout\|cancel" "$CONNECTOR_DIR/src/test" 2>/dev/null; then
                     echo "✓ Retry classifier has test coverage"
                 else
                     echo "⚠️  WARNING: Retry classifier override lacks test coverage"
