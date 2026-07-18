@@ -242,7 +242,12 @@ These are mandatory in addition to `verify_connector.sh`:
    - Source schema discovery sets `sourcePrimaryKey` and `sourceCursorField`; it does not set effective `primaryKey` or `cursorField` directly.
 
 2. **Incremental-window correctness**
-   - Read examples use `CutoffTimeSyncUtils` for deterministic lower/upper bounds.
+   - Any time-based source that can express an exclusive upper bound uses a deterministic
+     `[previousCutoff, currentCutoff)` window, including JDBC connectors.
+   - JDBC connectors explicitly opt into the base cutoff-time hook; inheriting the base
+     count-at-boundary fallback is not sufficient when the database supports `cursor < cutoff`.
+   - Cutoff end state stores `value=currentCutoff` with `recordCount=null`; result maximums and
+     boundary counts do not control advancement.
    - No index-based cursor extraction (`getCursorPosition().get(0)`) in generic templates.
 
 3. **Schema inference consistency**

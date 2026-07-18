@@ -707,7 +707,19 @@ echo "━━━━━━━━━━━━━━━━━━━━━━━━�
 echo "✓ CHECK 8: Incremental Sync Implementation (if applicable)"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
-if grep -q "identifyCursorFields\|setSourceCursorField\|setCursorField\|SyncStateRequest" "$CONNECTOR_FILE"; then
+if $IS_JDBC_CONNECTOR; then
+    echo "ℹ️  JDBC cursor discovery and lower-bound fallback are inherited from BaseJdbcConnector"
+    if grep -q "useCutoffTimeForTimeBasedCursors" "$CONNECTOR_FILE" \
+            && grep -A4 "useCutoffTimeForTimeBasedCursors" "$CONNECTOR_FILE" | grep -q "return true"; then
+        echo "✓ JDBC connector opts time-based cursors into cutoff-time windows"
+        echo "✓ Cutoff state bypasses result maximums and boundary-count queries"
+    else
+        echo "⚠️  WARNING: JDBC connector uses the count-at-boundary fallback"
+        echo "   → Confirm the source cannot enforce cursor < cutoffTime"
+        echo "   → If it can, override useCutoffTimeForTimeBasedCursors() and return true"
+        WARNINGS=$((WARNINGS + 1))
+    fi
+elif grep -q "identifyCursorFields\|setSourceCursorField\|setCursorField\|SyncStateRequest" "$CONNECTOR_FILE"; then
     echo "ℹ️  Incremental sync features detected"
 
     if grep -q "identifyCursorFields" "$CONNECTOR_FILE"; then

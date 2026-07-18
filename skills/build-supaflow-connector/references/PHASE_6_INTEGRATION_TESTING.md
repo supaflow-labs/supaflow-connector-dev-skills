@@ -53,6 +53,7 @@ import io.supaflow.connector.sdk.model.SyncStateResponse;
 import io.supaflow.connector.sdk.processor.RecordProcessor;
 import io.supaflow.connector.sdk.processor.RecordProcessingResult;
 import io.supaflow.core.context.ConnectorRuntimeContext;
+import io.supaflow.core.enums.CanonicalType;
 import io.supaflow.core.enums.ConnectorCapabilities;
 import io.supaflow.core.exception.ConnectorException;
 import io.supaflow.core.model.datasource.DatasourceInitResponse;
@@ -76,6 +77,7 @@ import java.util.Set;
 import java.util.stream.Collectors;
 import java.io.IOException;
 import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
 
 import static org.assertj.core.api.Assertions.*;
 
@@ -397,10 +399,12 @@ public class {Name}ConnectorIT {
             return;
         }
 
-        // First sync
+        // First sync. The engine supplies cutoffTime even for an initial read.
         List<Map<String, Object>> firstSyncRecords = new ArrayList<>();
         RecordProcessor processor1 = new TestRecordProcessor(firstSyncRecords, 1000);
-        ReadRequest request1 = createReadRequest(testObject, null, processor1);
+        OffsetDateTime initialCutoff = OffsetDateTime.now(ZoneOffset.UTC);
+        SyncStateRequest initialState = createSyncState(null, initialCutoff, true);
+        ReadRequest request1 = createReadRequest(testObject, initialState, processor1);
         ReadResponse response1 = connector.read(request1);
 
         SyncStateResponse syncState = response1.getSyncState();
@@ -434,7 +438,7 @@ public class {Name}ConnectorIT {
         // Second sync
         List<Map<String, Object>> secondSyncRecords = new ArrayList<>();
         RecordProcessor processor2 = new TestRecordProcessor(secondSyncRecords, 1000);
-        OffsetDateTime cutoffTime = OffsetDateTime.now();
+        OffsetDateTime cutoffTime = OffsetDateTime.now(ZoneOffset.UTC);
         SyncStateRequest syncStateRequest =
             createSyncState(cursorPosition, cutoffTime, false);
         ReadRequest request2 = createReadRequest(testObject, syncStateRequest, processor2);
@@ -474,11 +478,22 @@ public class {Name}ConnectorIT {
             .as("End cursor must include time-based cursor field: " + cursorFieldName)
             .isNotNull();
 
-        if (secondSyncRecords.isEmpty()) {
-            OffsetDateTime advancedCursor = OffsetDateTime.parse(advancedCursorValue);
+        OffsetDateTime advancedCursor = OffsetDateTime.parse(advancedCursorValue);
+        FieldMetadata cursorMetadata = testObject.getField(cursorFieldName);
+        boolean timeBasedCursor = cursorMetadata != null
+            && Set.of(CanonicalType.INSTANT, CanonicalType.LOCALDATETIME, CanonicalType.LOCALDATE)
+                .contains(cursorMetadata.getCanonicalType());
+        if (timeBasedCursor) {
             assertThat(advancedCursor)
-                .as("Zero-record incremental sync should still advance cursor")
-                .isGreaterThanOrEqualTo(cutoffTime);
+                .as("Bounded time cursor must advance exactly to cutoffTime")
+                .isEqualTo(cutoffTime);
+            IncrementalField advancedField = endCursor.stream()
+                .filter(f -> cursorFieldName.equals(f.getFieldName()))
+                .findFirst()
+                .orElseThrow();
+            assertThat(advancedField.getRecordCount())
+                .as("Cutoff cursor must not persist a boundary count")
+                .isNull();
         }
     }
 
@@ -627,6 +642,8 @@ For at least one incremental object, IT must validate:
 2. Upper-bound exclusivity: every incremental record has `cursor < cutoffTime`.
 3. Zero-record advancement: when incremental returns no records, end cursor still advances for time-based cursors.
 4. End-state presence: `ReadResponse.syncState.endCursorPosition` is non-null and non-empty after incremental reads.
+5. For a bounded time cursor, end state equals the supplied cutoff exactly and has
+   `recordCount == null`; the test must not accept a maximum returned record value instead.
 
 ### Field-Selection Test Oracles (Required)
 

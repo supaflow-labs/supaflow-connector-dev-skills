@@ -139,7 +139,11 @@ mvn clean install
 
 - Never call `processor.close()` manually in `read()`.
 - Always set `originalDataType` on every `FieldMetadata`.
-- Always implement incremental sync with `CutoffTimeSyncUtils` patterns (API connectors) or base class cursor support (JDBC connectors).
+- Always choose incremental state by source capability, not by connector base class. If a
+  time-based source can enforce an exclusive upper bound (`cursor < cutoffTime`), it MUST use a
+  cutoff-time window and persist the cutoff without `recordCount`; this includes JDBC connectors,
+  which must opt into the base cutoff hook instead of inheriting the count-based fallback. Use
+  boundary counts only when the source cannot enforce a reliable upper cutoff.
 - Never treat cursor position as a single scalar; respect incremental field structures.
 - Always run cursor identification (`identifyCursorFields()` or equivalent) and lock cursor fields.
 - Treat field selection as a runtime contract. Discovery exposes the full schema, but reads must emit only explicitly selected fields plus required identity, cursor, deletion, and framework fields. Push the projection into the source API when supported, and filter both dlt hints and emitted rows so deselected null columns cannot reappear during normalize.

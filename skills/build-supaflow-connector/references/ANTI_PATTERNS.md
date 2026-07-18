@@ -534,9 +534,15 @@ For other source shapes:
 - Replays equal-cursor bursts forever when the source only supports `>= cursor`
 
 Choose the strategy that matches the source:
-- bounded window available: `cutoffTime`
+- bounded window available: `cutoffTime` (required even for JDBC connectors)
 - boundary count available: `recordCount`
 - boundary count unavailable: `customState.incremental_boundary`
+
+Do not treat extending `BaseJdbcConnector` as a reason to choose `recordCount`. The base
+count-at-boundary path is a compatibility fallback for lower-bound-only sources. A JDBC source
+whose SQL dialect supports both `cursor >= previousCutoff` and `cursor < currentCutoff` must opt
+into the base cutoff-time hook. Its durable `IncrementalField.value` is the current cutoff and its
+`recordCount` is null, so the next read never issues `SELECT COUNT(*) ... WHERE cursor = ?`.
 
 **See**: Phase 5 documentation, Step 2 "Choose the Right Incremental Boundary Strategy"
 

@@ -19,13 +19,53 @@ BaseJdbcConnector provides complete implementations for:
 | Method | What It Does |
 |--------|-------------|
 | `init()` | Creates HikariCP DataSource from your `DatasourceConfig`, sets connection pool parameters |
-| `read(ReadRequest)` | Executes SELECT with incremental WHERE clauses, cancellation every 1000 records |
+| `read(ReadRequest)` | Executes SELECT with incremental WHERE clauses, cancellation every 1000 records; count-based state is the compatibility fallback unless the connector opts into cutoff windows |
 | `schema()` | Discovers catalogs, schemas, tables, columns via SchemaCrawler + ResultSetMetaData |
 | `identifyCursorFields()` | Auto-detects best cursor fields by name pattern scoring (systemmodstamp, updated_at, etc.) |
 | `cancel()` / `heartbeat()` | Statement cancellation via AtomicReference |
 | `mapToCanonicalType()` | Maps JDBC SQL type constants to CanonicalType enums |
 | `close()` | Shuts down DataSource and connection pool |
 | Primary key detection | From JDBC database metadata constraints |
+
+## Required Incremental Boundary Decision
+
+Extending `BaseJdbcConnector` does not decide the cursor strategy. Before accepting the inherited
+read behavior, classify the source:
+
+1. **Time cursor and reliable upper bound available**: use cutoff time. Databases that can execute
+   `cursor >= previousCutoff AND cursor < currentCutoff` are in this category.
+2. **No reliable upper bound, but exact boundary count available**: use the inherited
+   `recordCount` fallback.
+3. **Neither upper bound nor count available**: use connector-owned boundary dedup state rather
+   than raw maximum-value advancement.
+
+For category 1, override the base opt-in hook:
+
+```java
+@Override
+protected boolean useCutoffTimeForTimeBasedCursors() {
+    return true;
+}
+```
+
+The base cutoff path then:
+
+- Leaves an initial read unbounded so rows with a null cursor are captured.
+- Executes incremental reads as the half-open window
+  `[previousCutoff, currentCutoff)`.
+- Persists `IncrementalField.value = currentCutoff`.
+- Leaves `IncrementalField.recordCount` and `maxValueSeen` null; advancement does not depend on
+  result values or a separate `COUNT(*)` query.
+- Advances an empty incremental window to the current cutoff.
+- Preserves empty state for an empty initial baseline.
+
+Override `formatCutoffTimeForCursor(...)` only when the database requires connector-specific
+precision or literal formatting. Keep connector-specific prepared-parameter handling in
+`bindPlaceholder(...)` and `bindValue(...)`.
+
+Do not copy the inherited count-at-boundary behavior into a new warehouse connector merely
+because older PostgreSQL, Snowflake, or SQL Server paths still use it. The count path is a fallback,
+not the preferred JDBC pattern.
 
 ## What You MUST Implement For Every JDBC Connector
 
@@ -393,6 +433,7 @@ Before proceeding to Phase 6 (integration testing), verify:
 
 - [ ] Extends `BaseJdbcConnector`
 - [ ] `validateAndSetConnectorProperties()` returns correct `DatasourceConfig`
+- [ ] Time-based cursor strategy is classified; connectors with a reliable SQL upper bound override `useCutoffTimeForTimeBasedCursors()` and do not persist boundary counts
 - [ ] `mapTypeByName()` covers all database-specific type names
 - [ ] `convertToCanonicalValue()` handles all proprietary JDBC driver Java types
 - [ ] `checkForKnownExceptions()` covers auth, SSL, and connection errors
