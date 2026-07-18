@@ -1033,7 +1033,8 @@ if [[ -n "$CONNECTOR_DISPLAY_NAME" ]]; then
     fi
 
     if grep -rq "getIcon" "$CONNECTOR_SRC_DIR" --include="*.java" 2>/dev/null; then
-        if grep -R -A5 "getIcon" "$CONNECTOR_SRC_DIR" --include="*.java" 2>/dev/null | grep -q 'return[[:space:]]*""'; then
+        if grep -R -A5 "getIcon" "$CONNECTOR_SRC_DIR" --include="*.java" 2>/dev/null \
+                | grep -qE 'return[[:space:]]*""[[:space:]]*;'; then
             echo "❌ ERROR: getIcon() returns an empty icon"
             echo "   → Connector deployment/UI expects a real icon"
             ERRORS=$((ERRORS + 1))
