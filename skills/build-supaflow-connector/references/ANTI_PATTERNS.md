@@ -8,8 +8,12 @@
 
 - [Critical Anti-Patterns (Will Break Connector)](#critical-anti-patterns-will-break-connector)
   - [8b. Missing convertToCanonicalValue Override (JDBC Connectors)](#8b-missing-converttocanonicalvalue-override-jdbc-connectors)
+  - [8d. Treating Native JSON Text as a Plain String](#8d-treating-native-json-text-as-a-plain-string)
+  - [8e. Serializing Positional JDBC Struct Attributes](#8e-serializing-positional-jdbc-struct-attributes)
 - [Moderate Anti-Patterns (May Cause Issues)](#moderate-anti-patterns-may-cause-issues)
   - [8c. Insecure TLS Default (`trustServerCertificate=true`)](#8c-insecure-tls-default-trustservercertificatetrue)
+  - [8f. Treating `setFetchSize` as Proven Pagination](#8f-treating-setfetchsize-as-proven-pagination)
+  - [8g. Letting Metadata Performance Tests Fall Back](#8g-letting-metadata-performance-tests-fall-back)
 - [Minor Anti-Patterns (Code Quality)](#minor-anti-patterns-code-quality)
 - [Quick Verification Checklist](#quick-verification-checklist)
 
@@ -391,6 +395,62 @@ The base class utility method does not know these types and throws `ClassCastExc
 
 ---
 
+### 8d. Treating Native JSON Text as a Plain String
+
+**DO NOT:**
+```java
+if (value instanceof String) {
+    return JSON.writeValueAsString(value);
+}
+```
+
+This turns a JSON object payload into a quoted JSON string.
+
+**DO:**
+```java
+if (canonicalType == CanonicalType.JSON && value instanceof CharSequence text) {
+    return JSON.writeValueAsString(JSON.readTree(text.toString()));
+}
+```
+
+Branch on both canonical type and runtime value shape. Add driver-facing tests for JSON objects,
+arrays, and scalars; comparing only the textual wrapper is insufficient.
+
+---
+
+### 8e. Serializing Positional JDBC Struct Attributes
+
+**DO NOT:**
+```java
+if (value instanceof Struct struct) {
+    return JSON.writeValueAsString(struct.getAttributes());
+}
+```
+
+`Struct.getAttributes()` preserves positions but not nested field names. The resulting JSON array
+can look valid while changing the source value's meaning. The same class of silent loss occurs
+when a driver materializes a high-precision source temporal value in a narrower JDBC class.
+
+**DO:**
+```java
+@Override
+protected String renderSelectItem(FieldMetadata field) {
+    if (isStructuredSourceType(field.getOriginalDataType())) {
+        return sourceJsonProjection(field) + " AS " + field.getFormattedName();
+    }
+    if (driverTruncatesTime(field.getOriginalDataType())) {
+        return sourceStringProjection(field) + " AS " + field.getFormattedName();
+    }
+    return super.renderSelectItem(field);
+}
+```
+
+Project to a lossless source-native representation before ResultSet extraction and keep the
+original alias. Apply the hook to every read strategy. Reject any raw lossy `Struct` fallback, then
+prove named nested fields and exact fractional temporal precision in a live source IT.
+
+---
+
 ## Moderate Anti-Patterns (May Cause Issues)
 
 ### 8c. Insecure TLS Default (`trustServerCertificate=true`)
@@ -414,6 +474,51 @@ public String trustServerCertificate;
 ```
 
 **Why**: Defaulting certificate trust to `true` disables server certificate validation and can hide man-in-the-middle risks. Keep secure defaults for production and let users explicitly opt in for local/dev/self-signed setups.
+
+---
+
+### 8f. Treating `setFetchSize` as Proven Pagination
+
+**DO NOT:**
+```java
+statement.setFetchSize(recommendedPageSize);
+log.info("Reading in {}-row pages", recommendedPageSize);
+```
+
+The JDBC call is a hint. A driver may only store it while using a separate REST `MaxResults`
+setting, fixed Arrow batch, or native transport buffer. It also does not add SQL keyset/range
+chunking.
+
+**DO:** Audit the pinned driver and distinguish:
+
+1. connector SQL chunk/range size;
+2. JDBC fetch hint;
+3. driver protocol page size; and
+4. native API batch, buffer, and stream count.
+
+Use live telemetry to record the actual transport and peak memory. Do not infer unload behavior
+from a "high throughput" flag; unload creates external artifacts, while native APIs may still
+stream directly through the agent.
+
+---
+
+### 8g. Letting Metadata Performance Tests Fall Back
+
+**DO NOT:**
+```java
+long start = System.nanoTime();
+List<ObjectMetadata> metadata = connector.schema(); // may fall back per table
+assertThat(elapsed(start)).isLessThan(MAX_MS);
+```
+
+If the bulk path fails because of permissions or provider quota, the timed call can silently enter
+the table-count-dependent JDBC baseline. The test then burns time and quota without isolating the
+bulk implementation.
+
+**DO:** Expose a test-only bulk-only/fail-fast entry point, assert the selected fetch path, and
+bound metadata query count as well as elapsed time. Keep exact bulk-to-legacy field parity behind
+an explicit environment flag. After parity is established, run the bulk path alone for routine
+catalog-scale validation.
 
 ---
 
@@ -508,10 +613,11 @@ fetchAndProcessRecords(request);
 RecordProcessingResult result = request.getRecordProcessor().completeProcessing();
 result = CutoffTimeSyncUtils.applyCutoffTimeToResult(result, request, cutoffTimeStr);
 
-// The utility handles:
-// - Records with cursor values -> replaces with cutoffTime
-// - Records with null cursor values -> creates end fields from cutoffTime
-// - Zero records -> advances cursor appropriately
+// The shared SDK policy handles:
+// - Initial baseline with records -> persists cutoffTime
+// - Empty initial baseline -> suppresses end cursor and remains initial
+// - Subsequent incremental window -> persists cutoffTime, including zero rows
+// - Cutoff state never carries recordCount
 ```
 
 For other source shapes:
@@ -534,9 +640,23 @@ For other source shapes:
 - Replays equal-cursor bursts forever when the source only supports `>= cursor`
 
 Choose the strategy that matches the source:
-- bounded window available: `cutoffTime`
+- bounded window available: `cutoffTime` (required even for JDBC connectors)
 - boundary count available: `recordCount`
 - boundary count unavailable: `customState.incremental_boundary`
+
+Do not treat extending `BaseJdbcConnector` as a reason to choose `recordCount`. The base
+count-at-boundary path is a compatibility fallback for lower-bound-only sources. A JDBC source
+whose SQL dialect supports both `cursor >= previousCutoff` and `cursor < currentCutoff` must opt
+into the base cutoff-time hook. Its durable `IncrementalField.value` is the current cutoff and its
+`recordCount` is null, so the next read never issues `SELECT COUNT(*) ... WHERE cursor = ?`.
+
+Do not manufacture an end cursor for an empty initial baseline. Advancing before any baseline row
+is materialized can make the next run behave as an incremental-only change/delete pass. The shared
+SDK must suppress that cursor. Connector IT must separately prove:
+
+- empty initial baseline: `endCursorPosition == null`
+- empty subsequent incremental window: end cursor equals the supplied cutoff and
+  `recordCount == null`
 
 **See**: Phase 5 documentation, Step 2 "Choose the Right Incremental Boundary Strategy"
 
@@ -946,6 +1066,33 @@ dest.setName(IdentifierFormatter.formatSnakeCase(targetName));
 
 ---
 
+### ANTI-PATTERN: Silently Rewriting Destination-Legal Identifiers
+
+**Severity**: CRITICAL
+
+Applying `NamespaceRules` and then stripping leading underscores, adding a letter prefix, or
+collapsing unsupported characters without collision handling can route distinct source objects to
+one destination object. It also violates `MIRROR_SOURCE`, whose purpose is to preserve legal source
+names.
+
+**Solution**:
+
+- Preserve raw source names through discovery.
+- Let `NamespaceRules` perform the user-selected transformation.
+- Validate each destination identifier class separately.
+- Quote legal SQL identifiers instead of sanitizing them merely to avoid quoting.
+- Reject invalid/blank resource namespaces, and resolve or reject every collision caused by a
+  necessary lossy transformation.
+
+Do not fabricate `_`, `n`, or another placeholder when normalization produces an empty name.
+Quoting does not make an invalid dataset/schema/API resource ID legal.
+
+**Detection**: Unit tests with leading digits/underscores, special characters, empty results, and
+two distinct inputs that would normalize to the same output; live IT through the production load
+format.
+
+---
+
 ### ANTI-PATTERN: Adding Tracking Columns in mapToTargetObject()
 
 **Severity**: CRITICAL
@@ -1258,12 +1405,119 @@ if (sourceObj.getCustomAttributes() != null) {
 
 ---
 
+### ANTI-PATTERN: Propagating Source NOT NULL Into Destination Data Columns
+
+**Severity**: CRITICAL
+
+Source nullability is metadata about the source, not a physical destination constraint. Making
+staging or target data columns required breaks sparse hard-delete tombstones, prevents later
+nullability relaxation, and makes additive evolution fail on warehouses that forbid adding a
+required column to an existing table.
+
+**Solution**: Create physical staging and target data fields as nullable, including source primary
+keys, and add new columns as nullable. Preserve any established shared convention for system fields
+without deriving data-column constraints from `FieldMetadata.nillable`.
+
+Do not add a migration for physical schemas produced only by an unreleased development revision.
+Add compatibility code only for a released or explicitly adopted physical state the connector must
+support.
+
+**Detection**: Start with source fields where `nillable=false`; inspect stage and target schemas and
+load a sparse tombstone/null through the real path.
+
+---
+
+### ANTI-PATTERN: Merging the Raw Stage Without Deterministic Deduplication
+
+**Severity**: CRITICAL
+
+Passing a raw stage table to `MERGE` allows multiple source rows to match one target identity.
+Some warehouses reject the statement; others choose a nondeterministic winner.
+
+Deduplicate by `_supa_id` before `MERGE`. Order descending by selected business cursor fields,
+then `_supa_synced`, then `_supa_index`; without cursor fields, use the latter two. Prove both the
+generated SQL and the live merge path.
+
+---
+
+### ANTI-PATTERN: Treating System-Field Presence as System-Field Correctness
+
+**Severity**: CRITICAL
+
+Finding `_supa_*` names in metadata does not prove the values agree with other destinations.
+Build IT input with the production writer and assert the physical types plus exact values for
+`_supa_synced`, `_supa_deleted`, `_supa_index`, `_supa_id`, and `_supa_job_id`. Connector code
+must not independently generate or redefine them.
+
+---
+
+### ANTI-PATTERN: Treating Test Setup Tokens as Behavioral Evidence
+
+**Severity**: CRITICAL
+
+Creating a callback list, setting `errorPath`, mentioning `CanonicalType`, or importing
+`java.util.concurrent` does not prove callback accounting, error artifacts, an all-types round
+trip, or concurrent cold-schema loading. Assert the produced values and destination state through
+the real execution path. The verifier intentionally requires those assertions rather than token
+presence.
+
+---
+
+### ANTI-PATTERN: Cleaning External Staging Only After Successful Loads
+
+**Severity**: CRITICAL
+
+Success-path prefix cleanup leaves customer data behind when staging, load, or merge fails. Exercise
+a failed live load and prove either immediate job-prefix cleanup or the explicitly documented
+retained-diagnostics state protected by a short lifecycle rule.
+
+---
+
+### ANTI-PATTERN: Retrying Asynchronous Warehouse Jobs Without Stable Identity
+
+**Severity**: CRITICAL
+
+Submitting a new vendor job after a lost response can duplicate work. Treating
+duplicate/already-exists as failure discards a healthy job, while returning a retriable error after
+cancelling a deterministic job on timeout can make every platform retry reattach to the cancelled
+job.
+
+**Solution**: Use deterministic per-attempt IDs, fetch before submit, attach to duplicate jobs with
+bounded visibility polling, recover ambiguous submits under the same ID, and advance attempts only
+after a terminal retriable vendor result. Keep quota and retry classifications operation-specific.
+Use runtime cancellation in every poller; make connector job timeouts opt-in unless the platform
+defines a different default, and report timeout-after-cancel as terminal.
+
+**Detection**: Unit tests for get-first restart, 409/duplicate plus temporary get-not-found,
+ambiguous submit, terminal quota, cancellation, and timeout.
+
+---
+
+### ANTI-PATTERN: Creating Customer Resources During Routine Validation
+
+**Severity**: HIGH
+
+Creating a schema/dataset/table or running an upload/load probe from normal `init()` hides
+misspelled configuration, leaks resources, consumes job quota on every sync, and can validate a
+different normalized name than `load()` actually uses.
+
+**Solution**: Keep routine initialization metadata-only and side-effect-free. Validate required
+destination-role settings, the exact target identifiers used by load, resource existence/location,
+and error classifications. Run a write probe only in a distinct user-invoked connection-test flow
+with cancellation and guaranteed cleanup.
+
+**Detection**: Assert normal init performs no create/upload/load calls and preserves transient,
+permission, validation, and cancellation error types.
+
+---
+
 ## Destination Anti-Patterns Summary
 
 | Anti-Pattern | Severity | Detection Method |
 |-------------|----------|------------------|
 | Using Instant.now() for sync time | CRITICAL | Code review |
 | Ignoring NamespaceRules | CRITICAL | Verify CHECK 17 |
+| Silently rewriting legal identifiers | CRITICAL | Collision tests + production-format live IT |
 | Adding tracking columns | CRITICAL | Verify CHECK 17, code review |
 | Wrong CSV file pattern | CRITICAL | Verify CHECK 19/20, IT tests |
 | Fake stage location for direct DB destination | CRITICAL | Verify CHECK 19 |
@@ -1272,6 +1526,13 @@ if (sourceObj.getCustomAttributes() != null) {
 | jobContext.toString() for sync_id | HIGH | Code review |
 | Simplified IT test data | HIGH | Code review, CHECK 24 |
 | Not preserving customAttributes | HIGH | Code review |
+| Propagating source NOT NULL | CRITICAL | Required-source metadata + sparse-row live IT |
+| Merging a raw, duplicate stage | CRITICAL | SQL unit test + live merge |
+| Testing only `_supa_*` field presence | CRITICAL | Exact live schema/value assertions |
+| Treating setup tokens as behavioral evidence | CRITICAL | Assertion-level verifier checks |
+| Cleaning external staging only on success | CRITICAL | Failure-path live IT |
+| Retrying async jobs without stable identity | CRITICAL | Duplicate/ambiguous-submit/timeout tests |
+| Creating customer resources during routine validation | HIGH | Side-effect and error-classification tests |
 
 ---
 

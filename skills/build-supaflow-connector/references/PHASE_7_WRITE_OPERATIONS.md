@@ -21,6 +21,7 @@
 - [Step 4: Implement load()](#step-4-implement-load)
 - [Step 5: Implement executeSqlScript()](#step-5-implement-executesqlscript)
 - [Step 5.5: Propagating Sync Metadata (syncTime, sync_id) Critical](#step-55-propagating-sync-metadata-synctime-sync_id-critical)
+- [Step 5.5.1: Preserve the Shared System-Field Contract](#step-551-preserve-the-shared-system-field-contract)
 - [Step 6: Update ConnectorCapabilities](#step-6-update-connectorcapabilities)
 - [Step 7: Warehouse Destination Maturity Gate](#step-7-warehouse-destination-maturity-gate)
 - [Gate Verification](#gate-verification)
@@ -262,16 +263,48 @@ Maps source object metadata to destination-compatible format.
 **YOU MUST:**
 1. Apply `NamespaceRules` for schema/table/column names (includes pipeline prefix)
 2. Preserve `customAttributes` from source object (connector-specific metadata, not sync metadata)
-3. Normalize identifiers per connector conventions (lowercase, uppercase, etc.)
+3. Validate and quote the resulting identifiers according to the destination's distinct
+   catalog/schema/table/column rules
 
 **YOU MUST NOT:**
-1. Add tracking columns (`_supa_synced`, `_supa_job_id`, `_supa_deleted`)
+1. Add tracking columns (`_supa_synced`, `_supa_deleted`, `_supa_index`, `_supa_id`,
+   `_supa_job_id`)
    - The platform's writer/schema mapper adds these automatically
    - Adding them here will cause duplicates and break schema generation
 
 2. Ignore `NamespaceRules` parameters
    - Pipeline prefix MUST be applied via NamespaceRules
    - Ignoring this causes tables to have wrong names in destination
+
+### Identifier Preservation, Validation, and Collision Safety
+
+Identifier handling has separate responsibilities. Keep them separate:
+
+1. Source discovery returns raw, unquoted identifiers.
+2. `NamespaceRules` applies the user-selected namespace policy.
+3. The destination validates the result for that identifier class and quotes it when rendering
+   SQL.
+
+Under `MIRROR_SOURCE`, preserve every source identifier the destination legally supports. Do not
+lowercase, transliterate, strip a leading underscore, or add a prefix merely to avoid quoting.
+Quoting is a SQL-rendering mechanism, however; it does not make an invalid dataset, schema,
+catalog, bucket, stage, or API resource ID valid. If an unquotable resource namespace is invalid,
+fail with a validation error that points the user to an explicit normalizing rule such as
+`FIVETRAN_NAMING` or to a valid configured default.
+
+Any lossy transformation must satisfy all of these:
+
+- It is required by the destination or explicitly requested by `NamespaceRules`.
+- Null, blank, and empty normalized results are rejected; never fabricate `_`, `n`, or another
+  placeholder resource name.
+- Collisions are resolved or rejected within the correct scope. For example, if `_sales` and
+  `n_sales` would both become `n_sales`, do not silently route both source schemas to one dataset.
+- Length truncation uses a stable suffix/hash and the destination's unit (characters versus UTF-8
+  bytes).
+- Reserved-prefix handling cannot collide with an existing legal identifier.
+
+Test resource namespaces separately from quoted table/column names because destinations often
+apply different grammars and length limits to each class.
 
 **File-based destinations (S3, GCS, etc.)**
 - Use `NamespaceRules.getSchemaName()` and `getTableName()` even if the destination has no schema.
@@ -452,6 +485,29 @@ private FieldMetadata mapToTargetField(ObjectMetadata sourceObj,
 // Implement {Name}DataTypeMapper.mapFromCanonicalType(...) in the connector module,
 // or call the existing connector-specific mapper directly if one already exists.
 ```
+
+### Destination Physical Nullability Contract
+
+`FieldMetadata.nillable` describes the source. It is not a destination `NOT NULL` instruction.
+Supaflow destination data columns are physically nullable, including source primary keys and other
+fields discovered as non-nullable. Build both staging and target DDL with nullable data fields, and
+add new columns to existing warehouse tables as nullable.
+
+This is required because:
+
+- Staging can receive sparse hard-delete tombstones that contain only identity/system fields.
+- A source can later relax `NOT NULL`; the destination must accept the first real null without a
+  constraint migration.
+- Warehouses commonly reject adding a required column to a populated table.
+
+System fields may follow an established destination-specific shared convention, but connector code
+must not infer data-column constraints from source nullability. Add a regression that starts with
+`FieldMetadata.setNillable(false)` and inspects both the stage and target physical schemas.
+
+Do not add a compatibility path solely for tables created by an unreleased development revision.
+If a released connector or an explicit adopted-table contract can leave required physical columns,
+then add and test a real relaxation/compatibility path; otherwise keep the implementation focused
+on the final create/evolution contract.
 
 ---
 
@@ -906,9 +962,37 @@ partitionValues.put("SYNC_ID", syncId);
 
 Without consistent sync metadata:
 - Partitions have inconsistent timestamps
-- `_supa_synced_at` doesn't match actual sync time
-- `sync_id` is random, can't track data lineage
+- `_supa_synced` doesn't match actual sync time
+- `_supa_job_id` is detached from the job, so data lineage is lost
 - Incremental syncs may skip or duplicate data
+
+---
+
+## Step 5.5.1: Preserve the Shared System-Field Contract
+
+The production writer owns all five system fields:
+
+| Field | Required meaning |
+|-------|------------------|
+| `_supa_synced` | Request sync time |
+| `_supa_deleted` | Shared hard-delete marker |
+| `_supa_index` | Shared deterministic input order |
+| `_supa_id` | Shared SDK identity derived from effective primary keys |
+| `_supa_job_id` | Request job details ID |
+
+Destination code maps and loads these fields but MUST NOT generate different values or redefine
+their semantics. Do not copy a hashing algorithm into the loader. Build integration input through
+the production `RecordWritePlan` and writer/system-field enrichment path.
+
+Live IT must assert:
+
+1. all five fields appear exactly once in the physical destination schema;
+2. each has the destination's expected physical type;
+3. a known row has the exact sync time, delete marker, input index, shared `_supa_id`, and job ID;
+4. append, merge/update, and hard-delete paths retain the same identity rules.
+
+Schema-only assertions are insufficient because drift usually occurs while enriching or loading
+values rather than while constructing metadata.
 
 ---
 
@@ -1050,20 +1134,35 @@ For cloud warehouse destinations, create live integration tests that cover:
 3. **Row accounting and error artifacts**
    - Assert `LoadResponse.successCount` and `LoadResponse.errorCount`.
    - Assert callback status row counts, not only the returned response.
+   - Merely collecting `CallbackStatusDto` objects is not evidence. Assert the terminal callback's
+     input, success, and error counts.
    - Force at least one row-level load error in moderate mode and verify the error file contents.
+     Merely setting `errorPath` is not evidence; read the produced artifact and assert the rejected
+     row and error details.
    - Force the same bad row in strict mode and verify load fails before the final merge.
 
 4. **Schema evolution**
    - Initial table creation.
-   - Add-column DDL.
+   - Add-column DDL, proving the new physical field is nullable even when source metadata says
+     `nillable=false`.
    - Type widening/type-change path.
    - Dropped-column behavior for load modes that recreate tables.
    - Zero-row and DDL-only paths.
 
 5. **Type parity**
-   - A live all-types round trip for every supported canonical type.
-   - Explicit binary coverage for JSONL/CSV handling (`BINARY`, Base64, destination binary type).
-   - JSON/native semi-structured coverage where the destination has a native type.
+   - Use a dedicated `*AllTypes*IT` so a generic `CanonicalType` reference cannot masquerade as
+     coverage.
+   - Send every canonical type through the production writer, stage, and load path; read values
+     back from the destination and compare exact values.
+   - Cover nulls, maximum supported decimal precision/scale, microsecond-or-better temporal
+     precision where supported, Unicode/control characters, and explicit binary bytes.
+   - Compare parsed JSON values for objects, arrays, and scalars; textual wrapper equality does
+     not catch double serialization.
+   - For a hybrid JDBC connector, perform readback through the connector source path as well as
+     physical destination assertions so actual driver value shapes are exercised.
+   - Maintain a separate discovery-mapping test for canonical-to-native and native-to-canonical
+     mappings. Document honest widenings/collapses such as `INT -> INT64 -> LONG`; value stability
+     does not imply canonical-type identity.
 
 6. **Stage file handling**
    - Production file names: `success_part_*` with the expected extension for the writer format.
@@ -1072,14 +1171,37 @@ For cloud warehouse destinations, create live integration tests that cover:
    - Empty non-zero load rejection and zero-row load success.
 
 7. **Merge edge cases**
-   - Same-batch duplicate primary keys.
+   - Same-batch duplicate primary keys with a deterministic winner. Partition stage rows by
+     `_supa_id`; order by selected business cursor fields descending, then `_supa_synced`
+     descending, then `_supa_index` descending. Without cursor fields, use `_supa_synced` then
+     `_supa_index`.
+   - Prove the generated SQL ordering in a unit test and execute the live merge path with
+     duplicate identities. This avoids warehouse-specific multi-match failures and cross-
+     connector winner drift.
    - Hard-delete markers if `supportsHardDeletes(true)`.
+     Write `_supa_deleted=true` through the production path and query the destination to prove the
+     target row is absent. SQL text containing a delete clause is not live behavior evidence.
    - Windowed replace if the connector exposes replacement windows.
 
 8. **Concurrent cold-schema first load**
    - Run at least two first-load objects into the same brand-new schema in parallel.
    - Assert all loads succeed and no duplicate namespace/key error escapes (for example, `pg_namespace` duplicate-key races).
    - Make schema/table creation idempotent, serialized, or retryable. Do not rely on sequential local smoke tests to catch this.
+
+9. **Identifier contract**
+   - Prove legal quoted identifiers, including leading digits/underscores and destination-supported
+     spaces, punctuation, or Unicode.
+   - Prove invalid and empty resource namespaces fail without creating a fallback namespace.
+   - Prove lossy normalization cannot silently collapse two source namespaces/tables/columns.
+   - Exercise the production writer and stage/load format. DDL/DML acceptance alone does not prove
+     that JSONL, CSV, Parquet, COPY, or load-job schema handling accepts the same names.
+
+10. **Asynchronous job recovery, when the destination exposes jobs**
+    - Deterministic ID reattachment before submit.
+    - Duplicate/already-exists recovery with bounded read-after-write visibility polling.
+    - Ambiguous submit recovery without advancing to a new attempt.
+    - Terminal quota/configuration failures versus transient operation-specific retries.
+    - Cancellation propagation and opt-in timeout behavior.
 
 ### Destination Physical Design Preservation
 
@@ -1090,7 +1212,78 @@ Examples:
 - Redshift: preserve existing `DISTKEY` and `SORTKEY` on `OVERWRITE`, first-run `DROP`, or other drop-before-rename paths.
 - Warehouses with clustering/partitioning: preserve supported clustering or partition hints when the destination table already has them.
 
+The live test must create user-owned physical design, execute the destructive path, and read the
+design back afterward. A connector-created default clustering/partition key, or the mere presence
+of physical-design code, does not prove preservation.
+
 If a preserved key column no longer exists in the new schema, skip that specific key with a warning. Do not fail the sync solely because an optional physical-design hint points at a removed or unsupported column.
+
+### External Stage Ownership, Security, and Test Cost
+
+For warehouses that load through object storage, make the staging trust boundary an explicit
+design decision before coding:
+
+- Prefer a customer-provided bucket/container when files contain customer data. This lets the
+  customer retain IAM, encryption/CMEK, retention, audit, and network controls.
+- Scope permissions to the configured bucket and job-specific prefix. Do not require project-wide
+  storage administration.
+- Use collision-resistant job prefixes and delete staged objects after terminal success or
+  failure. Configure a short lifecycle backstop for process interruption or explicitly retained
+  failure diagnostics. Live IT must assert normal-path prefix cleanup and exercise a failed load:
+  either assert immediate prefix cleanup or assert the documented retained-diagnostics state and
+  bounded lifecycle. Unit tests must validate any required lifecycle rule.
+- Do not silently fall back to a Supaflow-managed bucket. A managed option requires a separate
+  documented ownership, encryption, retention, incident-response, and deletion model.
+- Bound live-test spend with provider-native controls: maximum bytes billed/query, test-scoped job
+  timeout, table/dataset expiration, narrow fixtures, and deterministic cleanup. A test timeout is
+  not a reason to introduce a finite production default; if the connector exposes a timeout, keep
+  unlimited behavior as `0` unless the platform defines another convention.
+
+Record the required data-warehouse and object-storage permissions separately so users can apply
+least privilege.
+
+### Side-Effect-Free Connection and Setup Validation
+
+Routine connector `init()` runs at the start of pipeline jobs. Keep it cheap and side-effect-free:
+
+- Validate destination-role requirements even when the same connector can also be a source.
+- Validate the exact namespace produced by `NamespaceRules` and used by `load()`, not a raw
+  pre-normalization/default value that the data path never uses.
+- Do not create a dataset/schema/table to make validation pass, and do not let a typo become a new
+  customer resource.
+- Do not run a full upload/load/delete write probe on every sync. If the product has a distinct
+  user-invoked connection-test flow, a write probe may run there only with explicit temporary
+  names, guaranteed cleanup, cancellation, and an established no-leak policy.
+- Preserve authentication, permission, validation, transient, and cancellation error
+  classifications. Do not wrap every runtime exception as `PERMISSION_ERROR`.
+
+Metadata-only checks may confirm resource existence, location, and readable permissions. Actual
+load remains the authoritative write-permission check unless a dedicated connection-test API
+supports a scoped probe.
+
+### Restart-Safe Asynchronous Warehouse Jobs
+
+When load/query operations are asynchronous jobs, retries must be idempotent across process
+restarts:
+
+1. Derive a deterministic job ID from the Supaflow job ID, target, phase, and attempt.
+2. Fetch that ID before submitting.
+3. On duplicate/already-exists, attach to the existing job. Poll the same ID with bounded backoff
+   because the create response and read visibility can race.
+4. On an ambiguous submit failure, keep recovering or resubmitting the same attempt ID; do not
+   advance merely because the client lost the response.
+5. Advance to a new attempt only after the prior job reached a terminal, genuinely retriable
+   vendor state.
+
+Keep retry policy operation-scoped. A quota reason that merits a short retry around a metadata
+update may be a terminal daily quota for load/query jobs. Test HTTP/status code plus vendor reason
+instead of adding every observed string to one shared set.
+
+Use the runtime cancellation supplier in every poller, including any dedicated connection-test
+probe. Production job timeouts should be opt-in (`0` means unlimited) unless a platform-wide
+policy says otherwise. If a timeout cancels a deterministic job, surface a terminal timeout; a
+retriable error would reattach to the cancelled ID on the next platform retry and can wedge the
+sync.
 
 ### Retry Classification for JDBC Destinations
 
@@ -1220,6 +1413,14 @@ bash <skill-root>/scripts/verify_connector.sh {name} <platform-root>
 | ☐ stage() returns valid StageResponse | Code review |
 | ☐ load() handles all LoadModes | Code review |
 | ☐ load() handles DDL-only and zero-rows | Code review |
+| ☐ Dedicated live all-types test proves exact write/read values and discovery widenings | Test |
+| ☐ All five `_supa_*` fields have exact live schema and value assertions | Test |
+| ☐ MERGE dedup ordering is cursor → sync time → input index | SQL unit test + live merge |
+| ☐ Identifier preservation/validation/collision behavior is proved through production load | Unit + live IT |
+| ☐ Source non-nullability never creates required staging/target data fields | Unit + live IT |
+| ☐ Async jobs reattach safely and classify retries/timeouts per operation | Unit + live IT |
+| ☐ Routine init/validation creates no customer datasets, schemas, tables, or probe files | Unit + live IT |
+| ☐ External stage ownership, least privilege, cleanup, and test cost limits are explicit | Design + IT |
 | ☐ executeSqlScript() works (if JDBC) | Test |
 | ☐ ConnectorCapabilities includes DESTINATION | Code review |
 | ☐ Identifier formatter methods implemented (no UnsupportedOperationException) | Code review |
@@ -1231,7 +1432,9 @@ Add lightweight unit tests for naming and path generation (no live services):
 
 1. **NamespaceRules mapping**
    - `mapToTargetObject()` uses `NamespaceRules.getSchemaName()` and `getTableName()`
-   - Schema/table names are normalized per connector conventions
+   - `MIRROR_SOURCE` preserves legal names exactly
+   - Invalid/blank resource namespaces fail instead of receiving a fabricated fallback
+   - Every lossy normalization path resolves or rejects collisions
 2. **File destination paths**
    - Base path includes configured prefix + schema + table
    - Schema is a distinct path segment (not concatenated into file name)
@@ -1271,7 +1474,10 @@ grep -n "getCapabilitiesConfig" src/main/java/**/*.java
 | **Using fake stage locations for direct DB destinations** | load() takes the wrong path | Return `StageResponse.noOp(...)` when no stage exists |
 | **Generating sync_id in the connector** | Data lineage is detached from the job | Use `request.getJobDetailsId()` |
 | **Not cleaning up staging tables** | Orphaned tables accumulate | Drop staging tables after load |
-| **Hardcoding identifiers** | Reserved word conflicts | Use identifier formatter |
+| **Hardcoding or silently sanitizing identifiers** | Reserved-word failures or namespace collisions | Apply NamespaceRules, validate by identifier class, and quote |
+| **Propagating source NOT NULL** | Sparse deletes and relaxed schemas fail | Keep physical destination data columns nullable |
+| **Non-idempotent async job retries** | Duplicate work or cancelled-job retry wedges | Deterministic IDs, get-first, duplicate attach, operation-scoped retries |
+| **Creating resources during routine validation** | Typos leak resources and every sync pays probe cost | Keep init side-effect-free; scope probes to explicit test flow |
 | **Not setting DESTINATION capability** | Connector won't show as destination | Add to getConnectorCapabilities() |
 
 ---
@@ -1314,6 +1520,7 @@ Once all verification checks pass:
 private String buildMergeSql(ObjectMetadata stageMetadata, ObjectMetadata targetMetadata) {
     String targetFqn = getFullyQualifiedName(targetMetadata);
     String stageFqn = getFullyQualifiedName(stageMetadata) + "_STAGE";
+    String deduplicatedSource = buildDeduplicatedSourceSql(stageFqn, stageMetadata);
 
     // Get primary key fields for join condition
     List<String> pkFields = stageMetadata.getFields().stream()
@@ -1350,11 +1557,16 @@ private String buildMergeSql(ObjectMetadata stageMetadata, ObjectMetadata target
 
     return String.format(
         "MERGE INTO %s AS target " +
-        "USING %s AS source " +
+        "USING (%s) AS source " +
         "ON (%s) " +
         "WHEN MATCHED THEN UPDATE SET %s " +
         "WHEN NOT MATCHED THEN INSERT (%s) VALUES (%s)",
-        targetFqn, stageFqn, onClause, updateClause, insertColumns, insertValues
+        targetFqn, deduplicatedSource, onClause, updateClause, insertColumns, insertValues
     );
 }
 ```
+
+`buildDeduplicatedSourceSql(...)` must select one row per `_supa_id` using the connector's window
+syntax and the required cursor → `_supa_synced` → `_supa_index` ordering. Do not feed a raw stage
+table to `MERGE`; BigQuery and other warehouses can reject multiple source matches, while engines
+that accept them may choose a nondeterministic winner.

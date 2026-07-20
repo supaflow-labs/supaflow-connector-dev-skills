@@ -19,13 +19,66 @@ BaseJdbcConnector provides complete implementations for:
 | Method | What It Does |
 |--------|-------------|
 | `init()` | Creates HikariCP DataSource from your `DatasourceConfig`, sets connection pool parameters |
-| `read(ReadRequest)` | Executes SELECT with incremental WHERE clauses, cancellation every 1000 records |
+| `read(ReadRequest)` | Executes SELECT with incremental WHERE clauses, cancellation every 1000 records; count-based state is the compatibility fallback unless the connector opts into cutoff windows |
 | `schema()` | Discovers catalogs, schemas, tables, columns via SchemaCrawler + ResultSetMetaData |
 | `identifyCursorFields()` | Auto-detects best cursor fields by name pattern scoring (systemmodstamp, updated_at, etc.) |
 | `cancel()` / `heartbeat()` | Statement cancellation via AtomicReference |
 | `mapToCanonicalType()` | Maps JDBC SQL type constants to CanonicalType enums |
 | `close()` | Shuts down DataSource and connection pool |
 | Primary key detection | From JDBC database metadata constraints |
+
+## Required Incremental Boundary Decision
+
+Extending `BaseJdbcConnector` does not decide the cursor strategy. Before accepting the inherited
+read behavior, classify the source:
+
+1. **Time cursor and reliable upper bound available**: use cutoff time. Databases that can execute
+   `cursor >= previousCutoff AND cursor < currentCutoff` are in this category.
+2. **No reliable upper bound, but exact boundary count available**: use the inherited
+   `recordCount` fallback.
+3. **Neither upper bound nor count available**: use connector-owned boundary dedup state rather
+   than raw maximum-value advancement.
+
+For category 1, override the base opt-in hook:
+
+```java
+@Override
+protected boolean useCutoffTimeForTimeBasedCursors() {
+    return true;
+}
+```
+
+The base cutoff path then:
+
+- Leaves an initial read unbounded so rows with a null cursor are captured.
+- Executes incremental reads as the half-open window
+  `[previousCutoff, currentCutoff)`.
+- Persists `IncrementalField.value = currentCutoff`.
+- Leaves `IncrementalField.recordCount` and `maxValueSeen` null; advancement does not depend on
+  result values or a separate `COUNT(*)` query.
+- Advances an empty incremental window to the current cutoff.
+- Preserves empty state for an empty initial baseline.
+
+Treat those last two cases as different invariants:
+
+| Request | Rows | Required end state |
+|---------|------|--------------------|
+| Initial baseline | `> 0` | supplied cutoff, `recordCount == null` |
+| Initial baseline | `0` | no end cursor; bootstrap remains initial |
+| Subsequent incremental | `> 0` | supplied cutoff, `recordCount == null` |
+| Subsequent incremental | `0` | supplied cutoff, `recordCount == null` |
+
+The shared SDK owns the empty-initial suppression. Do not compensate in connector-specific
+`read()` code. Add live connector tests for both empty cases because a non-empty baseline cannot
+prove the bootstrap invariant.
+
+Override `formatCutoffTimeForCursor(...)` only when the database requires connector-specific
+precision or literal formatting. Keep connector-specific prepared-parameter handling in
+`bindPlaceholder(...)` and `bindValue(...)`.
+
+Do not copy the inherited count-at-boundary behavior into a new warehouse connector merely
+because older PostgreSQL, Snowflake, or SQL Server paths still use it. The count path is a fallback,
+not the preferred JDBC pattern.
 
 ## What You MUST Implement For Every JDBC Connector
 
@@ -104,6 +157,8 @@ If the connector should also be a destination, do not use the stubs above. Add `
 - `load()` handles `request.isDdlOnly()` and `request.isZeroRows()` before requiring `localDataPath`.
 - `load()` discovers `success_part_*.csv` files from `request.getLocalDataPath()` and ignores error files.
 - `load()` creates an in-database staging table, bulk-loads local CSV data, updates tracking columns with `request.getSyncTime()` and `request.getJobDetailsId()`, then executes the requested load mode.
+- Staging and target data columns remain physically nullable even when source metadata has
+  `nillable=false`; additive columns are nullable as well.
 - Keep `executeSqlScript()` inherited from `BaseJdbcConnector` unless the database needs connector-specific script behavior.
 
 For SQL Server destination support, model the implementation on Postgres but adapt the dialect: SQL Server identifiers, native type mapping, bulk-load API, staging-table DDL, `MERGE` syntax, and schema-evolution SQL.
@@ -115,6 +170,9 @@ For SQL Server destination support, model the implementation on Postgres but ada
 Connector-specific destination code should:
 - Reuse inherited FQN/formatter methods instead of hand-concatenating catalog/schema/table names.
 - Override or configure only database-specific pieces such as quote string (`"` vs `[]`), separator, catalog/schema support, and identifier case sensitivity.
+- Preserve destination-legal names under `MIRROR_SOURCE`. Apply `NamespaceRules` before
+  destination validation/quoting, reject invalid or blank results, and detect collisions caused by
+  any required lossy transformation.
 - Follow `PostgresConnector.mapToTargetObject(...)` as the direct database reference, then swap in the connector's own data type mapper and dialect helpers.
 
 ## What You MUST Override For Source Correctness
@@ -177,6 +235,8 @@ Every JDBC driver returns proprietary Java objects for database-specific types:
 - **SQL Server**: `microsoft.sql.DateTimeOffset`, `com.microsoft.sqlserver.jdbc.Geometry`
 - **PostgreSQL**: `org.postgresql.util.PGobject`, `org.postgresql.jdbc.PgArray`
 - **Oracle**: `oracle.sql.TIMESTAMP`, `oracle.sql.STRUCT`
+- **BigQuery and other warehouses**: native JSON may be returned as ordinary text; arrays and
+  structs may arrive as `Array`, `Struct`, maps, or driver-specific wrappers
 
 ```java
 @Override
@@ -186,6 +246,11 @@ public String convertToCanonicalValue(Object value, CanonicalType canonicalType)
     }
 
     try {
+        // Preserve JSON semantics when the driver returns native JSON as text.
+        if (canonicalType == CanonicalType.JSON && value instanceof CharSequence text) {
+            return JSON.writeValueAsString(JSON.readTree(text.toString()));
+        }
+
         // Handle driver-specific types by checking the package prefix
         if (value.getClass().getName().startsWith("com.microsoft.sqlserver.")) {
             // DateTimeOffset -> ISO-8601 string
@@ -210,6 +275,103 @@ public String convertToCanonicalValue(Object value, CanonicalType canonicalType)
 ```
 
 **Why this matters**: The base class calls `CanonicalTypeUtil.convertToCanonicalValue()` which expects standard Java types (`String`, `BigDecimal`, `Timestamp`, etc.). When the JDBC driver returns `microsoft.sql.DateTimeOffset` instead of `java.sql.Timestamp`, the utility method does not know how to handle it and throws an exception. Your override intercepts these proprietary types before they reach the utility.
+
+Do not stop at class-package checks. Conversion is a two-dimensional contract:
+
+1. source canonical type (`JSON`, `BINARY`, `INSTANT`, and so on)
+2. actual runtime value shape returned by the selected driver
+
+Use a credential-gated all-types readback test to exercise the real driver. For JSON, compare
+parsed JSON trees so an object, array, number, boolean, or null cannot silently become a quoted
+string. For arrays/structs, preserve element order and field names when the canonical output is
+JSON; document any unsupported nested destination shape separately.
+
+### Project Before JDBC When the Runtime Value Is Already Lossy
+
+Conversion cannot restore information the driver has already discarded. Standard
+`java.sql.Struct.getAttributes()` is positional and does not expose nested field names, and some
+drivers materialize high-precision source `TIME` values as `java.sql.Time` after truncating the
+fractional component. Serializing those Java values more carefully still produces corrupt output.
+
+Use the shared SELECT-item projection hook so every JDBC read path receives a lossless value while
+the source schema is still available. For example, a warehouse dialect may render:
+
+```java
+@Override
+protected String renderSelectItem(FieldMetadata field) {
+    String column = field.getFormattedName();
+    String sourceType = field.getOriginalDataType();
+    String type = sourceType == null ? "" : sourceType.toUpperCase(Locale.ROOT);
+    if (type.startsWith("STRUCT") || type.startsWith("ARRAY<STRUCT")) {
+        return "TO_JSON_STRING(" + column + ") AS " + column;
+    }
+    if ("TIME".equals(type)) {
+        return "CAST(" + column + " AS STRING) AS " + column;
+    }
+    return super.renderSelectItem(field);
+}
+```
+
+The exact functions are source-specific; the contract is not. Preserve nested field names and
+temporal precision before ResultSet extraction, keep the original alias, and route legacy,
+chunked, and retry reads through the same projection hook. If a raw lossy wrapper reaches
+`convertToCanonicalValue()`, fail with a diagnostic instead of silently emitting a positional
+array or truncated value.
+
+Prove this with both a contract test for the generated projection and a live source read that:
+
+- parses the nested output and asserts named fields and array element order;
+- asserts the exact source fractional temporal value;
+- exercises populated, null-equivalent, and boundary values; and
+- documents source type-system constraints, such as repeated arrays that use `[]` instead of SQL
+  `NULL`.
+
+### Audit Read Throughput at Every Layer
+
+Do not describe `PreparedStatement.setFetchSize()` as pagination or proof of bounded memory. A
+JDBC warehouse source may have four independent controls:
+
+| Layer | Example | What to verify |
+|-------|---------|----------------|
+| SQL range/chunk | keyset predicate or `LIMIT` window | Whether the connector actually splits the object |
+| JDBC fetch hint | `setFetchSize(recommendedPageSize)` | Whether the pinned driver consumes or merely stores the hint |
+| Driver REST page | `MaxResults`, result-page token | The driver's real default and configured maximum |
+| Native transport | Arrow/gRPC batch, stream count, buffer | Eligibility, actual selected transport, and concurrency |
+
+Inspect the pinned driver version, not just the JDBC interface. A "high throughput" option may
+select a native read API and still stream through the agent; it is not an unload unless it creates
+external artifacts. Likewise, a page-size value calculated by the pipeline has no memory effect if
+the connector only carries it in the request or the driver ignores the fetch hint.
+
+Use a wide object, a large object, and a native all-types object for performance tests. Capture
+per-object duration, rows, staged bytes, peak agent memory, and the actual transport selected.
+Export-to-object-storage is justified only when parallel shard processing or a direct destination
+load offsets export, listing, download, parsing, and cleanup overhead.
+
+### Catalog-Scale Bulk Metadata
+
+Per-table `DatabaseMetaData.getColumns()` and `getPrimaryKeys()` calls become a correctness risk at
+catalog scale because tests time out or hit provider query quotas before discovering drift. When
+the source exposes set-oriented metadata, use bounded dataset/schema batches so query count grows
+with metadata batches rather than table count. Reuse the catalogs/schemas discovered during
+initialization and prefer the narrowest information-schema scope supported by the user's grants.
+
+A bulk path must preserve the established JDBC metadata contract, including object sets, table/view
+flags, source type literals, canonical types, precision/scale, descriptions, primary-key ordinals,
+field FQN semantics, formatting, and default normalization. In particular, a source SQL default
+reported as the literal `NULL` must remain a null metadata value.
+
+Add a credential-gated catalog-scale parity/performance IT with:
+
+- tables-only versus full-discovery object-set parity;
+- positive field coverage plus bounded elapsed time and metadata-query count;
+- an assertion that the bulk transport was actually selected;
+- a bulk-only/fail-fast test entry point so failure cannot start the slow per-table fallback;
+- optional exact comparison with the legacy metadata path behind an explicit environment flag.
+
+Once exact legacy parity has been established, keep the normal test on the bulk path and its
+budgets. Do not rerun the table-count-dependent baseline on every validation. Treat provider quota
+errors as environment failures and report them separately from implementation regressions.
 
 ## What You SHOULD Override
 
@@ -393,13 +555,25 @@ Before proceeding to Phase 6 (integration testing), verify:
 
 - [ ] Extends `BaseJdbcConnector`
 - [ ] `validateAndSetConnectorProperties()` returns correct `DatasourceConfig`
+- [ ] Time-based cursor strategy is classified; connectors with a reliable SQL upper bound override `useCutoffTimeForTimeBasedCursors()` and do not persist boundary counts
+- [ ] Live cutoff IT proves an empty initial baseline has no end cursor and an empty subsequent incremental window advances exactly to cutoff
 - [ ] `mapTypeByName()` covers all database-specific type names
-- [ ] `convertToCanonicalValue()` handles all proprietary JDBC driver Java types
+- [ ] `convertToCanonicalValue()` handles driver Java types plus canonical JSON/binary/temporal semantics
+- [ ] Lossy driver wrappers are repaired in a shared source projection hook; live IT asserts
+      nested field names and exact temporal precision
+- [ ] JDBC fetch hints, driver page controls, native transport, and SQL chunking are audited
+      separately against the pinned driver
+- [ ] Any bulk metadata path has bulk-only catalog-scale parity/performance IT with bounded query
+      count and an opt-in legacy baseline
 - [ ] `checkForKnownExceptions()` covers auth, SSL, and connection errors
 - [ ] If source-only: stubs (`mapToTargetObject`, `stage`, `load`) throw `UnsupportedOperationException` or `UNSUPPORTED_OPERATION`
 - [ ] If source+destination: `getConnectorCapabilities()` includes `REPLICATION_DESTINATION`
 - [ ] If source+destination: `stage()` returns `StageResponse.noOp(...)`, not a fake stage location
 - [ ] If source+destination: `load()` reads `LoadRequest.getLocalDataPath()`, handles DDL-only/zero-rows, and uses `request.getSyncTime()` plus `request.getJobDetailsId()`
+- [ ] If source+destination: legal identifiers survive `MIRROR_SOURCE`, invalid/blank names fail,
+      and lossy transformations have collision tests
+- [ ] If source+destination: non-nullable source fields remain nullable in staging/target DDL and
+      additive evolution
 - [ ] POM has JDBC driver as `provided` scope with correct shade excludes
 - [ ] Destination connectors review/override `isRetryableException(SQLException)` and test terminal-error exclusions
 - [ ] Destination connectors cover concurrent first-load objects into a brand-new schema

@@ -53,6 +53,7 @@ import io.supaflow.connector.sdk.model.SyncStateResponse;
 import io.supaflow.connector.sdk.processor.RecordProcessor;
 import io.supaflow.connector.sdk.processor.RecordProcessingResult;
 import io.supaflow.core.context.ConnectorRuntimeContext;
+import io.supaflow.core.enums.CanonicalType;
 import io.supaflow.core.enums.ConnectorCapabilities;
 import io.supaflow.core.exception.ConnectorException;
 import io.supaflow.core.model.datasource.DatasourceInitResponse;
@@ -76,6 +77,7 @@ import java.util.Set;
 import java.util.stream.Collectors;
 import java.io.IOException;
 import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
 
 import static org.assertj.core.api.Assertions.*;
 
@@ -397,10 +399,12 @@ public class {Name}ConnectorIT {
             return;
         }
 
-        // First sync
+        // First sync. The engine supplies cutoffTime even for an initial read.
         List<Map<String, Object>> firstSyncRecords = new ArrayList<>();
         RecordProcessor processor1 = new TestRecordProcessor(firstSyncRecords, 1000);
-        ReadRequest request1 = createReadRequest(testObject, null, processor1);
+        OffsetDateTime initialCutoff = OffsetDateTime.now(ZoneOffset.UTC);
+        SyncStateRequest initialState = createSyncState(null, initialCutoff, true);
+        ReadRequest request1 = createReadRequest(testObject, initialState, processor1);
         ReadResponse response1 = connector.read(request1);
 
         SyncStateResponse syncState = response1.getSyncState();
@@ -408,9 +412,15 @@ public class {Name}ConnectorIT {
             syncState != null ? syncState.getEndCursorPosition() : null;
         System.out.println("First sync: " + firstSyncRecords.size() + " records, cursor: " + cursorPosition);
 
-        if (cursorPosition == null || cursorPosition.isEmpty()) {
-            System.out.println("No cursor position returned, skipping incremental test");
+        if (firstSyncRecords.isEmpty()) {
+            assertThat(cursorPosition)
+                .as("An empty initial baseline must remain initial")
+                .isNull();
             return;
+        }
+
+        if (cursorPosition == null || cursorPosition.isEmpty()) {
+            fail("A non-empty bounded initial read must return its cutoff cursor");
         }
 
         String previousCursorValue = cursorPosition.stream()
@@ -434,7 +444,7 @@ public class {Name}ConnectorIT {
         // Second sync
         List<Map<String, Object>> secondSyncRecords = new ArrayList<>();
         RecordProcessor processor2 = new TestRecordProcessor(secondSyncRecords, 1000);
-        OffsetDateTime cutoffTime = OffsetDateTime.now();
+        OffsetDateTime cutoffTime = OffsetDateTime.now(ZoneOffset.UTC);
         SyncStateRequest syncStateRequest =
             createSyncState(cursorPosition, cutoffTime, false);
         ReadRequest request2 = createReadRequest(testObject, syncStateRequest, processor2);
@@ -458,7 +468,7 @@ public class {Name}ConnectorIT {
                 .isBefore(cutoffTime);
         }
 
-        // Cursor must always advance to end state; zero-record syncs must still advance time-based cursor.
+        // A subsequent incremental window always advances to its cutoff, including zero rows.
         SyncStateResponse secondSyncState = response2.getSyncState();
         assertThat(secondSyncState).as("Second sync must return sync state").isNotNull();
         List<IncrementalField> endCursor = secondSyncState.getEndCursorPosition();
@@ -474,11 +484,22 @@ public class {Name}ConnectorIT {
             .as("End cursor must include time-based cursor field: " + cursorFieldName)
             .isNotNull();
 
-        if (secondSyncRecords.isEmpty()) {
-            OffsetDateTime advancedCursor = OffsetDateTime.parse(advancedCursorValue);
+        OffsetDateTime advancedCursor = OffsetDateTime.parse(advancedCursorValue);
+        FieldMetadata cursorMetadata = testObject.getField(cursorFieldName);
+        boolean timeBasedCursor = cursorMetadata != null
+            && Set.of(CanonicalType.INSTANT, CanonicalType.LOCALDATETIME, CanonicalType.LOCALDATE)
+                .contains(cursorMetadata.getCanonicalType());
+        if (timeBasedCursor) {
             assertThat(advancedCursor)
-                .as("Zero-record incremental sync should still advance cursor")
-                .isGreaterThanOrEqualTo(cutoffTime);
+                .as("Bounded time cursor must advance exactly to cutoffTime")
+                .isEqualTo(cutoffTime);
+            IncrementalField advancedField = endCursor.stream()
+                .filter(f -> cursorFieldName.equals(f.getFieldName()))
+                .findFirst()
+                .orElseThrow();
+            assertThat(advancedField.getRecordCount())
+                .as("Cutoff cursor must not persist a boundary count")
+                .isNull();
         }
     }
 
@@ -625,8 +646,18 @@ For at least one incremental object, IT must validate:
 
 1. Lower-bound inclusivity: every incremental record has `cursor >= previousCursor`.
 2. Upper-bound exclusivity: every incremental record has `cursor < cutoffTime`.
-3. Zero-record advancement: when incremental returns no records, end cursor still advances for time-based cursors.
-4. End-state presence: `ReadResponse.syncState.endCursorPosition` is non-null and non-empty after incremental reads.
+3. Empty initial suppression: a deterministic empty initial table/object returns zero rows and
+   `endCursorPosition == null`, even when the request contains a cutoff.
+4. Empty incremental advancement: a deterministic empty subsequent window advances to the
+   supplied cutoff.
+5. End-state presence: `ReadResponse.syncState.endCursorPosition` is non-null and non-empty after
+   subsequent incremental reads.
+6. For a bounded time cursor, end state equals the supplied cutoff exactly and has
+   `recordCount == null`; the test must not accept a maximum returned record value instead.
+
+Do not satisfy both empty cases with one test or an opportunistic account state. Create an empty
+table/object fixture for the initial case and a known no-change half-open window for the subsequent
+case. The verifier treats these as separate behavioral contracts.
 
 ### Field-Selection Test Oracles (Required)
 
@@ -647,6 +678,44 @@ it proves completeness, not exclusion.
 
 ---
 
+### JDBC Warehouse Source Fidelity and Catalog-Scale Oracles
+
+When a JDBC warehouse source supports native structured or high-precision types, add a live native
+fixture with at least three rows:
+
+1. populated representative values;
+2. nullable values, with source-specific null equivalents documented; and
+3. boundary values for numeric precision, temporal precision, nested nulls, and collection shape.
+
+Read through the production connector path. Parse structured output and assert named fields,
+nested null behavior, and array order. Compare decimals as exact decimal values and temporal
+values at the source's supported precision. Do not accept `toString()` output, a positional struct
+array, or a JSON wrapper as semantic proof.
+
+For a set-oriented bulk metadata path, add a separate catalog-scale parity/performance IT:
+
+- compare tables-only and full-discovery object sets;
+- assert non-zero field coverage and the exact bulk fetch path;
+- bound metadata query count by dataset/schema batches, not by table count;
+- use generous elapsed-time budgets that catch regressions without becoming latency benchmarks;
+- expose a test-only bulk-only/fail-fast call so provider quota or permission failures cannot
+  launch the slow per-table fallback;
+- normalize and compare the complete legacy metadata contract, including object attributes,
+  fields, source types, canonical types, precision/scale, descriptions, PK ordinals, FQN/default
+  semantics, and formatting; and
+- gate the legacy per-table comparison behind an explicit environment variable.
+
+After bulk-to-legacy parity is proven, the routine test should run only the bulk path and budgets.
+Classify provider quota failures as environment failures rather than silently converting them into
+performance results.
+
+For data-read performance, do not call a row count above an arbitrary threshold "pagination."
+Use at least one wide object, one large object, and the native all-types fixture. Capture
+per-object duration, rows, staged bytes, peak agent memory, and actual transport. Separately record
+SQL chunking, JDBC fetch hint, driver protocol page size, and native stream/batch settings.
+
+---
+
 ### Destination Connector Handoff Rule
 
 For connectors with `REPLICATION_DESTINATION`, source-style IT is not enough. Complete Phase 7's warehouse or activation destination test matrix before declaring the connector ready for broad source-to-destination smoke tests.
@@ -659,6 +728,16 @@ For warehouse destinations, the minimum live IT evidence is:
 - Schema evolution DDL beyond column addition, including type changes.
 - All-type and binary round trips for the writer format used by the destination.
 - Stage file discovery using production `success_part_*` names.
+- Identifier behavior through the production writer/stage/load format: quoted legal names,
+  invalid/empty namespace rejection, and collision handling after lossy normalization. A standalone
+  DDL/DML quoting test is necessary but not sufficient.
+- Source metadata with `nillable=false` still produces physically nullable staging and target data
+  fields, including additive evolution.
+- For asynchronous warehouse APIs: deterministic get-first job recovery, duplicate visibility lag,
+  ambiguous submit, operation-scoped quota/retry classification, cancellation, and opt-in timeout
+  behavior.
+- Routine destination initialization is side-effect-free and validates the same target namespace
+  used by load.
 - Any destination physical-design preservation required by drop/recreate paths.
 
 Keep credentials in `export.env` and use `@EnabledIfEnvironmentVariable` or assumptions so CI without live credentials skips cleanly.
@@ -839,7 +918,7 @@ WARNINGS: 0
 | Check | Status |
 |-------|--------|
 | ☐ All 9 required IT tests pass | `mvn test` |
-| ☐ All 15 verification checks pass | `verify_connector.sh` |
+| ☐ All applicable verification checks pass | `verify_connector.sh` |
 | ☐ `export.env` added to .gitignore | Check .gitignore |
 | ☐ No credentials committed | Check git status |
 | ☐ Tests documented with @DisplayName | Code review |
