@@ -124,7 +124,7 @@ prerequisite reading, and a gate check that must pass before proceeding.
 | 3 | Connection, auth, token management | 7, 10 |
 | 4 | Schema discovery, ObjectMetadata, FieldMetadata | 3.5, 12, 13 |
 | 5 | Read operations, SyncState, CutoffTime pattern | 1, 2, 3, 8 |
-| 6 | Integration testing | 15 |
+| 6 | Integration testing | 15, conditional 15.5 |
 | 7 | Structured destinations: direct database, warehouse/file stage(), load() | 16-24, 27 |
 | 8 | Activation targets: activation mappings | 16-24 |
 
@@ -172,7 +172,7 @@ test_credentials: GOOGLE_APPLICATION_CREDENTIALS
 The bundled verification script auto-detects Java and Python/dlt connectors.
 It runs Python/dlt structural and field-projection gates, including required
 unit and `ReadHarness` test evidence, or all applicable Java checks:
-source/shared checks `1-15`, setup/dependency/cancellation checks `25-27`,
+source/shared checks `1-15.5`, setup/dependency/cancellation checks `25-27`,
 schema compliance check `3.5`, and destination checks `16-24.6` when
 destination capabilities are present.
 
@@ -185,7 +185,7 @@ export SUPAFLOW_PLATFORM_ROOT=/path/to/supaflow-platform
 bash scripts/verify_connector.sh <connector-name>
 ```
 
-### Source Checks (1-15)
+### Source Checks (1-15.5)
 
 | Check | What It Verifies |
 |-------|-----------------|
@@ -205,6 +205,7 @@ bash scripts/verify_connector.sh <connector-name>
 | 13 | Cursor field setting invoked |
 | 14 | Build artifacts not committed |
 | 15 | Integration tests exist |
+| 15.5 | Conditional JDBC source evidence: lossless nested/time projection and bulk metadata parity/performance |
 | 25 | Parent POM module registration |
 | 26 | Dependency version management |
 | 27 | Cancellation support |

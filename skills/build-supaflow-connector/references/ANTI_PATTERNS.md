@@ -9,8 +9,11 @@
 - [Critical Anti-Patterns (Will Break Connector)](#critical-anti-patterns-will-break-connector)
   - [8b. Missing convertToCanonicalValue Override (JDBC Connectors)](#8b-missing-converttocanonicalvalue-override-jdbc-connectors)
   - [8d. Treating Native JSON Text as a Plain String](#8d-treating-native-json-text-as-a-plain-string)
+  - [8e. Serializing Positional JDBC Struct Attributes](#8e-serializing-positional-jdbc-struct-attributes)
 - [Moderate Anti-Patterns (May Cause Issues)](#moderate-anti-patterns-may-cause-issues)
   - [8c. Insecure TLS Default (`trustServerCertificate=true`)](#8c-insecure-tls-default-trustservercertificatetrue)
+  - [8f. Treating `setFetchSize` as Proven Pagination](#8f-treating-setfetchsize-as-proven-pagination)
+  - [8g. Letting Metadata Performance Tests Fall Back](#8g-letting-metadata-performance-tests-fall-back)
 - [Minor Anti-Patterns (Code Quality)](#minor-anti-patterns-code-quality)
 - [Quick Verification Checklist](#quick-verification-checklist)
 
@@ -415,6 +418,39 @@ arrays, and scalars; comparing only the textual wrapper is insufficient.
 
 ---
 
+### 8e. Serializing Positional JDBC Struct Attributes
+
+**DO NOT:**
+```java
+if (value instanceof Struct struct) {
+    return JSON.writeValueAsString(struct.getAttributes());
+}
+```
+
+`Struct.getAttributes()` preserves positions but not nested field names. The resulting JSON array
+can look valid while changing the source value's meaning. The same class of silent loss occurs
+when a driver materializes a high-precision source temporal value in a narrower JDBC class.
+
+**DO:**
+```java
+@Override
+protected String renderSelectItem(FieldMetadata field) {
+    if (isStructuredSourceType(field.getOriginalDataType())) {
+        return sourceJsonProjection(field) + " AS " + field.getFormattedName();
+    }
+    if (driverTruncatesTime(field.getOriginalDataType())) {
+        return sourceStringProjection(field) + " AS " + field.getFormattedName();
+    }
+    return super.renderSelectItem(field);
+}
+```
+
+Project to a lossless source-native representation before ResultSet extraction and keep the
+original alias. Apply the hook to every read strategy. Reject any raw lossy `Struct` fallback, then
+prove named nested fields and exact fractional temporal precision in a live source IT.
+
+---
+
 ## Moderate Anti-Patterns (May Cause Issues)
 
 ### 8c. Insecure TLS Default (`trustServerCertificate=true`)
@@ -438,6 +474,51 @@ public String trustServerCertificate;
 ```
 
 **Why**: Defaulting certificate trust to `true` disables server certificate validation and can hide man-in-the-middle risks. Keep secure defaults for production and let users explicitly opt in for local/dev/self-signed setups.
+
+---
+
+### 8f. Treating `setFetchSize` as Proven Pagination
+
+**DO NOT:**
+```java
+statement.setFetchSize(recommendedPageSize);
+log.info("Reading in {}-row pages", recommendedPageSize);
+```
+
+The JDBC call is a hint. A driver may only store it while using a separate REST `MaxResults`
+setting, fixed Arrow batch, or native transport buffer. It also does not add SQL keyset/range
+chunking.
+
+**DO:** Audit the pinned driver and distinguish:
+
+1. connector SQL chunk/range size;
+2. JDBC fetch hint;
+3. driver protocol page size; and
+4. native API batch, buffer, and stream count.
+
+Use live telemetry to record the actual transport and peak memory. Do not infer unload behavior
+from a "high throughput" flag; unload creates external artifacts, while native APIs may still
+stream directly through the agent.
+
+---
+
+### 8g. Letting Metadata Performance Tests Fall Back
+
+**DO NOT:**
+```java
+long start = System.nanoTime();
+List<ObjectMetadata> metadata = connector.schema(); // may fall back per table
+assertThat(elapsed(start)).isLessThan(MAX_MS);
+```
+
+If the bulk path fails because of permissions or provider quota, the timed call can silently enter
+the table-count-dependent JDBC baseline. The test then burns time and quota without isolating the
+bulk implementation.
+
+**DO:** Expose a test-only bulk-only/fail-fast entry point, assert the selected fetch path, and
+bound metadata query count as well as elapsed time. Keep exact bulk-to-legacy field parity behind
+an explicit environment flag. After parity is established, run the bulk path alone for routine
+catalog-scale validation.
 
 ---
 

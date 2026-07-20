@@ -31,6 +31,17 @@ GOOD_CONNECTOR = """
 class DemoConnector extends BaseJdbcConnector {
     CanonicalType.JSON;
     protected boolean useCutoffTimeForTimeBasedCursors() { return true; }
+    protected String renderSelectItem(FieldMetadata field) {
+        if ("STRUCT".equals(field.getOriginalDataType())) {
+            return "TO_JSON_STRING(payload) AS payload";
+        }
+        if ("TIME".equals(field.getOriginalDataType())) {
+            return "CAST(event_time AS STRING) AS event_time";
+        }
+        return field.getName();
+    }
+    public boolean supportsBatchedSchemaFetch() { return true; }
+    List<ObjectMetadata> getObjectAndFieldListBulkOnlyForTest() { return List.of(); }
     public Set<ConnectorCapabilities> getConnectorCapabilities() {
         return Set.of(
             ConnectorCapabilities.REPLICATION_SOURCE,
@@ -68,6 +79,14 @@ class DemoSourceConnectorIT {
         assertThat(response.getSyncState().getEndCursorPosition()).isNotNull();
         assertThat(cursor.getValue()).isEqualTo(expectedCutoff);
         assertThat(cursor.getRecordCount()).isNull();
+    }
+
+    @Test
+    void readsNamedNestedStructAndExactTimeMicroseconds() {
+        JsonNode nested = JSON.readTree(row.get("profile"));
+        assertThat(nested.get("name").asText()).isEqualTo("alice");
+        assertThat(row.get("event_time")).isEqualTo("12:34:56.123456");
+        assertThat(sourceType).isEqualTo("STRUCT");
     }
 }
 """
@@ -191,6 +210,40 @@ class DemoConnectorContractTest {
         convertToCanonicalValue("[1,2]", CanonicalType.JSON);
         convertToCanonicalValue("\"scalar\"", CanonicalType.JSON);
     }
+
+    @Test
+    void rejectsRawJdbcStructBecauseItOmitsFieldNames() {
+        Struct struct = mock(Struct.class);
+        assertThatThrownBy(() -> convertToCanonicalValue(struct, CanonicalType.JSON))
+            .hasMessageContaining("field names");
+    }
+}
+"""
+
+GOOD_SCHEMA_PARITY_PERF_IT = """
+class DemoSchemaDiscoveryParityPerfIT {
+    @Test
+    void bulkOnlyCatalogPathHasParityAndBoundedCost() {
+        long start = System.nanoTime();
+        List<ObjectMetadata> tablesOnly = connector.getObjectListBulkOnlyForTest();
+        List<ObjectMetadata> fullMetadata =
+            connector.getObjectAndFieldListBulkOnlyForTest();
+        long elapsed = System.nanoTime() - start;
+        assertThat(connector.getBulkFetchPath())
+            .isEqualTo(BULK_INFORMATION_SCHEMA);
+        assertThat(names(tablesOnly)).isEqualTo(names(fullMetadata));
+        assertThat(metadataQueryCount).isLessThanOrEqualTo(datasetBatches * 3);
+        assertThat(elapsed).isLessThan(MAX_ELAPSED);
+        assertThat(fieldCount(fullMetadata)).isPositive();
+    }
+
+    @Test
+    void optionalLegacyMetadataParity() {
+        assumeTrue(Boolean.parseBoolean(System.getenv("RUN_LEGACY_PARITY")));
+        assertMetadataEqual(
+            connector.getObjectAndFieldListBulkOnlyForTest(),
+            connector.getObjectAndFieldListUsingBaseForTest());
+    }
 }
 """
 
@@ -226,6 +279,10 @@ class VerifyJavaContractEvidenceTest(unittest.TestCase):
         self._write_test("DemoLoaderSqlTest.java", GOOD_MERGE_TEST)
         self._write_test("DemoDataTypeMapperTest.java", GOOD_MAPPER_TEST)
         self._write_test("DemoConnectorContractTest.java", GOOD_JSON_TEST)
+        self._write_test(
+            "DemoSchemaDiscoveryParityPerfIT.java",
+            GOOD_SCHEMA_PARITY_PERF_IT,
+        )
 
     def tearDown(self) -> None:
         self._temp_dir.cleanup()
@@ -242,7 +299,105 @@ class VerifyJavaContractEvidenceTest(unittest.TestCase):
         self.assertEqual(
             [], MODULE.verify("cutoff-state", "demo", self.root)
         )
+        self.assertEqual([], MODULE.verify("jdbc-source", "demo", self.root))
         self.assertEqual([], MODULE.verify("warehouse", "demo", self.root))
+
+    def test_rejects_struct_conversion_without_lossless_source_projection(self) -> None:
+        connector_file = (
+            self.connector_dir
+            / "src/main/java/io/supaflow/connector/demo/DemoConnector.java"
+        )
+        connector_file.write_text(
+            GOOD_CONNECTOR.replace("TO_JSON_STRING", "LOSSY_STRUCT_TO_STRING"),
+            encoding="utf-8",
+        )
+
+        failures = MODULE.verify("jdbc-source", "demo", self.root)
+
+        self.assertTrue(
+            any("lossless named JSON" in failure for failure in failures)
+        )
+
+    def test_allows_scalar_only_select_projection_without_nested_contract(self) -> None:
+        connector_file = (
+            self.connector_dir
+            / "src/main/java/io/supaflow/connector/demo/DemoConnector.java"
+        )
+        connector_file.write_text(
+            """
+class DemoConnector extends BaseJdbcConnector {
+    protected String renderSelectItem(FieldMetadata field) {
+        return field.getFormattedName();
+    }
+    public Set<ConnectorCapabilities> getConnectorCapabilities() {
+        return Set.of(ConnectorCapabilities.REPLICATION_SOURCE);
+    }
+}
+""",
+            encoding="utf-8",
+        )
+
+        self.assertEqual([], MODULE.verify("jdbc-source", "demo", self.root))
+
+    def test_rejects_nested_source_it_without_named_field_assertions(self) -> None:
+        bad_source = GOOD_SOURCE_IT.replace(
+            'JsonNode nested = JSON.readTree(row.get("profile"));\n'
+            '        assertThat(nested.get("name").asText()).isEqualTo("alice");',
+            'String nested = String.valueOf(row.get("profile"));\n'
+            "        assertThat(nested).isNotNull();",
+        )
+        self._write_test("DemoSourceConnectorIT.java", bad_source)
+
+        failures = MODULE.verify("jdbc-source", "demo", self.root)
+
+        self.assertTrue(
+            any("named nested fields" in failure for failure in failures)
+        )
+
+    def test_rejects_bulk_perf_path_that_can_fall_back(self) -> None:
+        connector_file = (
+            self.connector_dir
+            / "src/main/java/io/supaflow/connector/demo/DemoConnector.java"
+        )
+        connector_file.write_text(
+            GOOD_CONNECTOR.replace(
+                "getObjectAndFieldListBulkOnlyForTest",
+                "getObjectAndFieldListForTest",
+            ),
+            encoding="utf-8",
+        )
+        self._write_test(
+            "DemoSchemaDiscoveryParityPerfIT.java",
+            GOOD_SCHEMA_PARITY_PERF_IT.replace(
+                "getObjectListBulkOnlyForTest",
+                "getObjectListForTest",
+            ).replace(
+                "getObjectAndFieldListBulkOnlyForTest",
+                "getObjectAndFieldListForTest",
+            ),
+        )
+
+        failures = MODULE.verify("jdbc-source", "demo", self.root)
+
+        self.assertTrue(
+            any("bulk-only fail-fast" in failure for failure in failures)
+        )
+
+    def test_rejects_bulk_perf_test_without_fetch_path_assertion(self) -> None:
+        self._write_test(
+            "DemoSchemaDiscoveryParityPerfIT.java",
+            GOOD_SCHEMA_PARITY_PERF_IT.replace(
+                'assertThat(connector.getBulkFetchPath())\n'
+                "            .isEqualTo(BULK_INFORMATION_SCHEMA);",
+                "",
+            ),
+        )
+
+        failures = MODULE.verify("jdbc-source", "demo", self.root)
+
+        self.assertTrue(
+            any("bulk fetch-path assertion" in failure for failure in failures)
+        )
 
     def test_rejects_empty_initial_cursor_advancement(self) -> None:
         bad_source = GOOD_SOURCE_IT.replace(

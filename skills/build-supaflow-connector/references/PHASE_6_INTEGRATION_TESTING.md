@@ -678,6 +678,44 @@ it proves completeness, not exclusion.
 
 ---
 
+### JDBC Warehouse Source Fidelity and Catalog-Scale Oracles
+
+When a JDBC warehouse source supports native structured or high-precision types, add a live native
+fixture with at least three rows:
+
+1. populated representative values;
+2. nullable values, with source-specific null equivalents documented; and
+3. boundary values for numeric precision, temporal precision, nested nulls, and collection shape.
+
+Read through the production connector path. Parse structured output and assert named fields,
+nested null behavior, and array order. Compare decimals as exact decimal values and temporal
+values at the source's supported precision. Do not accept `toString()` output, a positional struct
+array, or a JSON wrapper as semantic proof.
+
+For a set-oriented bulk metadata path, add a separate catalog-scale parity/performance IT:
+
+- compare tables-only and full-discovery object sets;
+- assert non-zero field coverage and the exact bulk fetch path;
+- bound metadata query count by dataset/schema batches, not by table count;
+- use generous elapsed-time budgets that catch regressions without becoming latency benchmarks;
+- expose a test-only bulk-only/fail-fast call so provider quota or permission failures cannot
+  launch the slow per-table fallback;
+- normalize and compare the complete legacy metadata contract, including object attributes,
+  fields, source types, canonical types, precision/scale, descriptions, PK ordinals, FQN/default
+  semantics, and formatting; and
+- gate the legacy per-table comparison behind an explicit environment variable.
+
+After bulk-to-legacy parity is proven, the routine test should run only the bulk path and budgets.
+Classify provider quota failures as environment failures rather than silently converting them into
+performance results.
+
+For data-read performance, do not call a row count above an arbitrary threshold "pagination."
+Use at least one wide object, one large object, and the native all-types fixture. Capture
+per-object duration, rows, staged bytes, peak agent memory, and actual transport. Separately record
+SQL chunking, JDBC fetch hint, driver protocol page size, and native stream/batch settings.
+
+---
+
 ### Destination Connector Handoff Rule
 
 For connectors with `REPLICATION_DESTINATION`, source-style IT is not enough. Complete Phase 7's warehouse or activation destination test matrix before declaring the connector ready for broad source-to-destination smoke tests.
@@ -880,7 +918,7 @@ WARNINGS: 0
 | Check | Status |
 |-------|--------|
 | ☐ All 9 required IT tests pass | `mvn test` |
-| ☐ All 15 verification checks pass | `verify_connector.sh` |
+| ☐ All applicable verification checks pass | `verify_connector.sh` |
 | ☐ `export.env` added to .gitignore | Check .gitignore |
 | ☐ No credentials committed | Check git status |
 | ☐ Tests documented with @DisplayName | Code review |

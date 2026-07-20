@@ -57,7 +57,7 @@ test_credentials: STRIPE_API_KEY
 | 3 | `PHASE_3_CONNECTION_AUTH.md` | setRuntimeContext, init, OAuth | 7, 10 |
 | 4 | `PHASE_4_SCHEMA_DISCOVERY.md` | schema(), ObjectMetadata, FieldMetadata | 3.5, 12, 13 |
 | 5 | `PHASE_5_READ_OPERATIONS.md` | read(), SyncStateRequest, RecordProcessor | 1, 2, 3, 8 |
-| 6 | `PHASE_6_INTEGRATION_TESTING.md` | IT tests, verification | 15 |
+| 6 | `PHASE_6_INTEGRATION_TESTING.md` | IT tests, verification | 15, conditional 15.5 |
 | 7 | `PHASE_7_WRITE_OPERATIONS.md` | Structured destinations: database/warehouse/file stage(), load() | 16-24, 27 |
 | 8 | `PHASE_8_ACTIVATION_TARGETS.md` | API destinations: activation mappings | 3, 12 |
 | - | `ANTI_PATTERNS.md` | Common mistakes to avoid | All |
@@ -199,6 +199,7 @@ build-supaflow-connector/
 | 13 | Cursor field setting invoked | 4 |
 | 14 | Build artifacts not committed | 1 |
 | 15 | Integration tests exist | 6 |
+| 15.5 | Conditional JDBC source evidence: lossless nested/time projection and bulk metadata parity/performance | JDBC guide, 6 |
 | 25 | Parent POM module registration | 1 |
 | 26 | Dependency version management | 2 |
 | 27 | Cancellation support | 3, 4, 5 |
@@ -252,17 +253,25 @@ These are mandatory in addition to `verify_connector.sh`:
      incremental windows advance to `currentCutoff`.
    - No index-based cursor extraction (`getCursorPosition().get(0)`) in generic templates.
 
-3. **Schema inference consistency**
+3. **JDBC source fidelity and catalog scale**
+   - Lossy nested/temporal JDBC wrappers are repaired in a shared source projection hook before
+     ResultSet extraction; live IT asserts named nested fields and exact temporal precision.
+   - SQL chunking, JDBC fetch hints, driver protocol pages, and native transport batches/streams
+     are reviewed separately against the pinned driver.
+   - Bulk metadata preserves the legacy contract and has a bulk-only catalog-scale test with
+     object-set parity, positive field coverage, query/time budgets, and an opt-in legacy baseline.
+
+4. **Schema inference consistency**
    - Sample-based schema discovery documents the SDK path: `RecordSupplier -> SchemaGenerator -> SchemaInferenceResult`.
    - If connector-specific heuristics exist, they are documented as post-inference reconciliation, not ad-hoc type guessing everywhere.
 
-4. **Integration test oracle quality**
+5. **Integration test oracle quality**
    - Incremental IT separately validates empty-initial cursor suppression and empty-subsequent
      cursor advancement, in addition to lower/upper bounds.
    - Record mapping IT validates schema-to-record field coverage, not just non-empty reads.
    - Sparse field-selection IT asserts both presence and absence and exercises initial plus incremental request shapes.
 
-5. **Warehouse destination maturity**
+6. **Warehouse destination maturity**
    - Live IT proves all load modes, destination table handling, additive and type-change schema evolution, callback row counts, read-back error artifacts, all-type/binary handling, and stage file discovery. Holding callbacks in a list or setting `errorPath` is not evidence.
    - Drop/recreate paths preserve destination-owned physical design where applicable.
    - JDBC destinations review retry classification and log enough stage/query/statement context for smoke-test debugging.

@@ -286,6 +286,93 @@ parsed JSON trees so an object, array, number, boolean, or null cannot silently 
 string. For arrays/structs, preserve element order and field names when the canonical output is
 JSON; document any unsupported nested destination shape separately.
 
+### Project Before JDBC When the Runtime Value Is Already Lossy
+
+Conversion cannot restore information the driver has already discarded. Standard
+`java.sql.Struct.getAttributes()` is positional and does not expose nested field names, and some
+drivers materialize high-precision source `TIME` values as `java.sql.Time` after truncating the
+fractional component. Serializing those Java values more carefully still produces corrupt output.
+
+Use the shared SELECT-item projection hook so every JDBC read path receives a lossless value while
+the source schema is still available. For example, a warehouse dialect may render:
+
+```java
+@Override
+protected String renderSelectItem(FieldMetadata field) {
+    String column = field.getFormattedName();
+    String sourceType = field.getOriginalDataType();
+    String type = sourceType == null ? "" : sourceType.toUpperCase(Locale.ROOT);
+    if (type.startsWith("STRUCT") || type.startsWith("ARRAY<STRUCT")) {
+        return "TO_JSON_STRING(" + column + ") AS " + column;
+    }
+    if ("TIME".equals(type)) {
+        return "CAST(" + column + " AS STRING) AS " + column;
+    }
+    return super.renderSelectItem(field);
+}
+```
+
+The exact functions are source-specific; the contract is not. Preserve nested field names and
+temporal precision before ResultSet extraction, keep the original alias, and route legacy,
+chunked, and retry reads through the same projection hook. If a raw lossy wrapper reaches
+`convertToCanonicalValue()`, fail with a diagnostic instead of silently emitting a positional
+array or truncated value.
+
+Prove this with both a contract test for the generated projection and a live source read that:
+
+- parses the nested output and asserts named fields and array element order;
+- asserts the exact source fractional temporal value;
+- exercises populated, null-equivalent, and boundary values; and
+- documents source type-system constraints, such as repeated arrays that use `[]` instead of SQL
+  `NULL`.
+
+### Audit Read Throughput at Every Layer
+
+Do not describe `PreparedStatement.setFetchSize()` as pagination or proof of bounded memory. A
+JDBC warehouse source may have four independent controls:
+
+| Layer | Example | What to verify |
+|-------|---------|----------------|
+| SQL range/chunk | keyset predicate or `LIMIT` window | Whether the connector actually splits the object |
+| JDBC fetch hint | `setFetchSize(recommendedPageSize)` | Whether the pinned driver consumes or merely stores the hint |
+| Driver REST page | `MaxResults`, result-page token | The driver's real default and configured maximum |
+| Native transport | Arrow/gRPC batch, stream count, buffer | Eligibility, actual selected transport, and concurrency |
+
+Inspect the pinned driver version, not just the JDBC interface. A "high throughput" option may
+select a native read API and still stream through the agent; it is not an unload unless it creates
+external artifacts. Likewise, a page-size value calculated by the pipeline has no memory effect if
+the connector only carries it in the request or the driver ignores the fetch hint.
+
+Use a wide object, a large object, and a native all-types object for performance tests. Capture
+per-object duration, rows, staged bytes, peak agent memory, and the actual transport selected.
+Export-to-object-storage is justified only when parallel shard processing or a direct destination
+load offsets export, listing, download, parsing, and cleanup overhead.
+
+### Catalog-Scale Bulk Metadata
+
+Per-table `DatabaseMetaData.getColumns()` and `getPrimaryKeys()` calls become a correctness risk at
+catalog scale because tests time out or hit provider query quotas before discovering drift. When
+the source exposes set-oriented metadata, use bounded dataset/schema batches so query count grows
+with metadata batches rather than table count. Reuse the catalogs/schemas discovered during
+initialization and prefer the narrowest information-schema scope supported by the user's grants.
+
+A bulk path must preserve the established JDBC metadata contract, including object sets, table/view
+flags, source type literals, canonical types, precision/scale, descriptions, primary-key ordinals,
+field FQN semantics, formatting, and default normalization. In particular, a source SQL default
+reported as the literal `NULL` must remain a null metadata value.
+
+Add a credential-gated catalog-scale parity/performance IT with:
+
+- tables-only versus full-discovery object-set parity;
+- positive field coverage plus bounded elapsed time and metadata-query count;
+- an assertion that the bulk transport was actually selected;
+- a bulk-only/fail-fast test entry point so failure cannot start the slow per-table fallback;
+- optional exact comparison with the legacy metadata path behind an explicit environment flag.
+
+Once exact legacy parity has been established, keep the normal test on the bulk path and its
+budgets. Do not rerun the table-count-dependent baseline on every validation. Treat provider quota
+errors as environment failures and report them separately from implementation regressions.
+
 ## What You SHOULD Override
 
 ### 5. `checkForKnownExceptions()` (Recommended)
@@ -472,6 +559,12 @@ Before proceeding to Phase 6 (integration testing), verify:
 - [ ] Live cutoff IT proves an empty initial baseline has no end cursor and an empty subsequent incremental window advances exactly to cutoff
 - [ ] `mapTypeByName()` covers all database-specific type names
 - [ ] `convertToCanonicalValue()` handles driver Java types plus canonical JSON/binary/temporal semantics
+- [ ] Lossy driver wrappers are repaired in a shared source projection hook; live IT asserts
+      nested field names and exact temporal precision
+- [ ] JDBC fetch hints, driver page controls, native transport, and SQL chunking are audited
+      separately against the pinned driver
+- [ ] Any bulk metadata path has bulk-only catalog-scale parity/performance IT with bounded query
+      count and an opt-in legacy baseline
 - [ ] `checkForKnownExceptions()` covers auth, SSL, and connection errors
 - [ ] If source-only: stubs (`mapToTargetObject`, `stage`, `load`) throw `UnsupportedOperationException` or `UNSUPPORTED_OPERATION`
 - [ ] If source+destination: `getConnectorCapabilities()` includes `REPLICATION_DESTINATION`

@@ -178,6 +178,19 @@ mvn clean install
   database-specific Java classes and canonical-type semantics. In particular, native JSON returned
   as text must remain a JSON object/array/scalar rather than becoming a quoted JSON string.
   Exercise the actual driver value shapes for JSON, binary, temporal, array, and struct types.
+- Conversion cannot recover semantics already discarded by a JDBC wrapper. If a driver exposes
+  structured values without field names or truncates source temporal precision, project the
+  column to a lossless source-native representation through the shared SELECT-item hook before
+  ResultSet extraction. Use the same hook for every read strategy and reject raw lossy wrappers
+  instead of silently serializing them.
+- Treat JDBC read sizing as four separate controls: SQL chunk/range size, JDBC fetch hint, driver
+  protocol page size, and native API batch/buffer/stream count. Verify the behavior of the pinned
+  driver and the actual selected transport; a high-throughput streaming API is not an unload
+  unless it creates external artifacts.
+- Bulk JDBC metadata discovery must preserve the established per-table metadata contract and have
+  a catalog-scale bulk-only parity/performance IT. Bound metadata queries by schema/dataset
+  batches, assert the bulk path and positive field coverage, and keep the slow legacy baseline
+  behind an explicit opt-in. Do not let the timed path silently fall back per table.
 - Keep integration tests meaningful: incremental windows, cursor advancement, and schema-to-record field coverage.
 - Every source connector must include a sparse field-selection regression covering initial and incremental reads. Assert that a selected field is present, a known deselected field is absent, and required identity/cursor/system fields remain usable. Python/dlt connectors must exercise `ReadHarness(selected_fields_factory=...)` and verify source/API projection separately with a fake client.
 - Every structured destination must prove the full system-field contract using production writer
@@ -211,10 +224,18 @@ mvn clean install
 - Phase 0 completed (mandatory references read).
 - Phase 0 gate output shown before first code edit (and repeated after compaction).
 - Correct phase track completed for the connector mode.
-- Verification script passes all applicable final-state checks (Python/dlt field-projection gates, or Java checks `1-15`, `25-27`, and source/destination-specific checks; Java destinations also run `16-24` plus maturity and packaging gates).
+- Verification script passes all applicable final-state checks (Python/dlt field-projection gates,
+  or Java checks `1-15.5`, `25-27`, and source/destination-specific checks; Java destinations also
+  run `16-24` plus maturity and packaging gates).
 - Verification script re-run after integration tests are written (not just at end of build).
 - Field selection is behaviorally proven for initial and incremental reads; accepting a `selected_fields` argument without using it does not satisfy this criterion.
 - Cutoff-state IT proves both empty-initial suppression and empty-incremental advancement.
+- JDBC sources with lossy nested/temporal driver shapes prove lossless source projection using a
+  contract test plus live named-field and exact-precision readback.
+- JDBC sources with bulk metadata prove tables-only/full parity, bounded query count and elapsed
+  time, positive field coverage, a bulk-only fail-fast path, and an opt-in exact legacy comparison.
+- JDBC source performance results identify SQL chunking, JDBC fetch hints, driver page controls,
+  native transport settings, actual transport, and peak agent memory separately.
 - Warehouse IT uses a dedicated all-types test and proves exact values, system fields, and merge
   winner ordering; a generic `CanonicalType` reference is not evidence.
 - Warehouse IT behaviorally asserts callback counts and reads error artifacts for forced bad rows

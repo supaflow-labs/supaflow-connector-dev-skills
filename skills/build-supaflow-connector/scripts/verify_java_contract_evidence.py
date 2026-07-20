@@ -507,6 +507,210 @@ def _verify_json_conversion(
     ]
 
 
+def _verify_lossless_jdbc_source_projection(
+    main_text: str,
+    test_text: str,
+    integration_test_text: str,
+) -> list[str]:
+    """Require source-side repair when standard JDBC values are already lossy."""
+    handles_jdbc_struct = bool(
+        re.search(
+            r"\b(?:java\.sql\.)?Struct\b|ARRAY\s*<\s*STRUCT|"
+            r"\b(?:STRUCT|RECORD)\s*<|TO_JSON_STRING",
+            main_text,
+            re.IGNORECASE,
+        )
+    )
+    renders_source_projection = bool(
+        re.search(r"\brenderSelectItem\s*\(", main_text)
+    )
+    handles_lossy_time = bool(
+        renders_source_projection
+        and re.search(r"[\"']TIME[\"']", main_text)
+    )
+    if not handles_jdbc_struct and not handles_lossy_time:
+        return []
+
+    failures: list[str] = []
+    if handles_jdbc_struct:
+        if not (
+            renders_source_projection
+            and "TO_JSON_STRING" in main_text
+        ):
+            failures.append(
+                "A JDBC source that handles Struct values must project structured columns "
+                "to lossless named JSON before ResultSet extraction"
+            )
+
+        raw_struct_rejected = bool(
+            re.search(r"\bStruct\b", test_text)
+            and re.search(r"assertThatThrownBy|assertThrows", test_text)
+            and re.search(
+                r"field.?names|positional|lossy|omit",
+                test_text,
+                re.IGNORECASE,
+            )
+        )
+        if not raw_struct_rejected:
+            failures.append(
+                "JDBC source contract tests must reject raw Struct fallback instead of "
+                "silently serializing positional attributes"
+            )
+
+        named_nested_readback = bool(
+            re.search(
+                r"JsonNode\s+(\w+)[\s\S]{0,1000}"
+                r"\1\.(?:get|path)\s*\(\s*\"[^\"]+\"\s*\)",
+                integration_test_text,
+            )
+            and re.search(
+                r"STRUCT|RECORD|nested|field.?name",
+                integration_test_text,
+                re.IGNORECASE,
+            )
+        )
+        if not named_nested_readback:
+            failures.append(
+                "Live JDBC source IT must parse structured output and assert named nested "
+                "fields, not merely compare a JSON wrapper"
+            )
+
+    if handles_lossy_time:
+        time_projection = bool(
+            re.search(
+                r"CAST\s*\([\s\S]{0,300}\bAS\s+STRING\s*\)",
+                main_text,
+                re.IGNORECASE,
+            )
+        )
+        if not time_projection:
+            failures.append(
+                "A JDBC source whose driver truncates TIME precision must project TIME "
+                "to a lossless source-native string"
+            )
+        microsecond_readback = bool(
+            re.search(r"\d{2}:\d{2}:\d{2}\.\d{6}", integration_test_text)
+            and re.search(
+                r"event.?time|\bTIME\b|microsecond",
+                integration_test_text,
+                re.IGNORECASE,
+            )
+            and re.search(r"isEqualTo|containsEntry", integration_test_text)
+        )
+        if not microsecond_readback:
+            failures.append(
+                "Live JDBC source IT must assert exact six-digit TIME precision"
+            )
+
+    return failures
+
+
+def _verify_bulk_metadata_parity_performance(
+    main_text: str,
+    integration_test_text: str,
+) -> list[str]:
+    bulk_metadata = bool(
+        re.search(
+            r"supportsBatchedSchemaFetch|JdbcBulkMetadata|BULK_INFORMATION_SCHEMA|"
+            r"INFORMATION_SCHEMA\.(?:TABLES|COLUMNS)",
+            main_text,
+            re.IGNORECASE,
+        )
+    )
+    if not bulk_metadata:
+        return []
+
+    failures: list[str] = []
+    evidence = {
+        "bulk fetch-path assertion": (
+            re.search(
+                r"BULK_INFORMATION_SCHEMA|bulk.?fetch.?path",
+                integration_test_text,
+                re.IGNORECASE,
+            )
+            and re.search(r"isEqualTo|containsExactly", integration_test_text)
+        ),
+        "tables-only/full object-set parity": (
+            re.search(r"tables.?only", integration_test_text, re.IGNORECASE)
+            and re.search(r"full.?(?:schema.?|catalog.?)?discovery|full.?metadata",
+                          integration_test_text, re.IGNORECASE)
+            and re.search(r"isEqualTo|containsExactlyInAnyOrder",
+                          integration_test_text)
+        ),
+        "bounded metadata-query count": (
+            re.search(r"metadata.?quer|query.?count",
+                      integration_test_text, re.IGNORECASE)
+            and "isLessThanOrEqualTo" in integration_test_text
+        ),
+        "catalog-scale elapsed-time budget": (
+            "System.nanoTime" in integration_test_text
+            and re.search(r"isLessThan\s*\(", integration_test_text)
+        ),
+        "positive field coverage": (
+            re.search(r"field.?count|fields", integration_test_text,
+                      re.IGNORECASE)
+            and "isPositive" in integration_test_text
+        ),
+        "exact optional legacy parity": (
+            re.search(r"System\.getenv|EnabledIfEnvironmentVariable",
+                      integration_test_text)
+            and re.search(r"assumeTrue|assumeFalse", integration_test_text)
+            and re.search(r"legacy|base", integration_test_text,
+                          re.IGNORECASE)
+            and re.search(r"assertMetadataEqual|fieldDiffs|metadata.?diff",
+                          integration_test_text, re.IGNORECASE)
+        ),
+        "bulk-only fail-fast performance path": (
+            re.search(
+                r"\w*(?:bulkOnly|bulk_only|failFast|fail_fast|disableFallback|"
+                r"fallbackDisabled|withoutFallback)\w*\s*\(",
+                main_text,
+                re.IGNORECASE,
+            )
+            and re.search(
+                r"\w*(?:bulkOnly|bulk_only|failFast|fail_fast|disableFallback|"
+                r"fallbackDisabled|withoutFallback)\w*\s*\(",
+                integration_test_text,
+                re.IGNORECASE,
+            )
+        ),
+    }
+    for label, present in evidence.items():
+        if not present:
+            failures.append(
+                "Bulk JDBC metadata IT lacks " + label
+            )
+    return failures
+
+
+def verify_jdbc_source(connector_dir: Path) -> list[str]:
+    main_files = _java_files(connector_dir / "src/main")
+    main_text = _strip_java_comments(_read(main_files))
+    classification = classify_connector(connector_dir)
+    if not classification["source"] or "BaseJdbcConnector" not in main_text:
+        return []
+
+    test_text = _read(_java_files(connector_dir / "src/test", "*Test.java"))
+    integration_test_text = _read(
+        _java_files(connector_dir / "src/test", "*IT.java")
+    )
+    failures: list[str] = []
+    failures.extend(
+        _verify_lossless_jdbc_source_projection(
+            main_text,
+            test_text,
+            integration_test_text,
+        )
+    )
+    failures.extend(
+        _verify_bulk_metadata_parity_performance(
+            main_text,
+            integration_test_text,
+        )
+    )
+    return failures
+
+
 def _verify_callback_and_error_artifacts(integration_test_text: str) -> list[str]:
     test_methods = _method_blocks(integration_test_text, tests_only=True)
     callback_asserted = any(
@@ -813,6 +1017,8 @@ def verify(check: str, connector_name: str, platform_root: Path) -> list[str]:
     )
     if check == "cutoff-state":
         return verify_cutoff_state(connector_dir)
+    if check == "jdbc-source":
+        return verify_jdbc_source(connector_dir)
     if check == "warehouse":
         return verify_warehouse(connector_dir, platform_root)
     raise ValueError(f"Unknown check: {check}")
@@ -820,7 +1026,10 @@ def verify(check: str, connector_name: str, platform_root: Path) -> list[str]:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("check", choices=("classify", "cutoff-state", "warehouse"))
+    parser.add_argument(
+        "check",
+        choices=("classify", "cutoff-state", "jdbc-source", "warehouse"),
+    )
     parser.add_argument("connector_name")
     parser.add_argument("platform_root", type=Path)
     args = parser.parse_args()

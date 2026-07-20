@@ -1364,6 +1364,12 @@ if $IS_JDBC_CONNECTOR; then
         WARNINGS=$((WARNINGS + 1))
     fi
 
+    if $IS_SOURCE_CONNECTOR; then
+        run_java_evidence_check \
+            "jdbc-source" \
+            "JDBC source evidence covers lossless nested/time projection and bulk metadata parity/performance when those capabilities are implemented"
+    fi
+
     if grep -rq "mapTypeByName" "$CONNECTOR_SRC_DIR" 2>/dev/null; then
         echo "✓ Has mapTypeByName override (maps database-specific type names)"
     else
