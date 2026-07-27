@@ -318,6 +318,27 @@ class VerifyJavaContractEvidenceTest(unittest.TestCase):
             any("lossless named JSON" in failure for failure in failures)
         )
 
+    def test_accepts_to_json_projection_and_named_full_tree_readback(self) -> None:
+        connector_file = (
+            self.connector_dir
+            / "src/main/java/io/supaflow/connector/demo/DemoConnector.java"
+        )
+        connector_file.write_text(
+            GOOD_CONNECTOR.replace("TO_JSON_STRING", "TO_JSON"),
+            encoding="utf-8",
+        )
+        self._write_test(
+            "DemoSourceConnectorIT.java",
+            GOOD_SOURCE_IT.replace(
+                'JsonNode nested = JSON.readTree(row.get("profile"));\n'
+                '        assertThat(nested.get("name").asText()).isEqualTo("alice");',
+                'assertThat(readJson(row.get("profile")))\n'
+                '            .isEqualTo(readJson("{\\"name\\":\\"alice\\"}"));',
+            ),
+        )
+
+        self.assertEqual([], MODULE.verify("jdbc-source", "demo", self.root))
+
     def test_allows_scalar_only_select_projection_without_nested_contract(self) -> None:
         connector_file = (
             self.connector_dir
