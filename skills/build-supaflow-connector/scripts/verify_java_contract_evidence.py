@@ -533,9 +533,16 @@ def _verify_lossless_jdbc_source_projection(
 
     failures: list[str] = []
     if handles_jdbc_struct:
+        lossless_struct_projection = bool(
+            re.search(
+                r"\bTO_JSON(?:_STRING)?\s*\(",
+                main_text,
+                re.IGNORECASE,
+            )
+        )
         if not (
             renders_source_projection
-            and "TO_JSON_STRING" in main_text
+            and lossless_struct_projection
         ):
             failures.append(
                 "A JDBC source that handles Struct values must project structured columns "
@@ -557,12 +564,23 @@ def _verify_lossless_jdbc_source_projection(
                 "silently serializing positional attributes"
             )
 
-        named_nested_readback = bool(
+        named_field_navigation = bool(
             re.search(
                 r"JsonNode\s+(\w+)[\s\S]{0,1000}"
                 r"\1\.(?:get|path)\s*\(\s*\"[^\"]+\"\s*\)",
                 integration_test_text,
             )
+        )
+        named_full_tree_readback = bool(
+            re.search(
+                r"(?:readTree|readJson)\s*\(\s*row\.get\s*\(\s*\"[^\"]+\"\s*\)"
+                r"\s*\)[\s\S]{0,600}\.isEqualTo\s*\([\s\S]{0,300}"
+                r"\{\\?\"[^\"\n]+\\?\"\s*:",
+                integration_test_text,
+            )
+        )
+        named_nested_readback = bool(
+            (named_field_navigation or named_full_tree_readback)
             and re.search(
                 r"STRUCT|RECORD|nested|field.?name",
                 integration_test_text,
