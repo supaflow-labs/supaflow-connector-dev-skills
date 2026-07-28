@@ -158,6 +158,36 @@ mvn clean install
 - Never default `trustServerCertificate=true` for production-facing connectors. Use `false` by default and require explicit opt-in for insecure/dev TLS behavior.
 - Source-only connectors MUST implement stub methods for `mapToTargetObject`, `stage`, and `load` that throw `UnsupportedOperationException` or `ConnectorException` with `UNSUPPORTED_OPERATION`. The interface requires them even if the connector is source-only.
 - For destinations, implement required destination methods and identifier formatter methods expected by mapping/pipeline.
+- Destinations MUST implement `DestinationTableHandling.DROP` as a physical-design-preserving
+  rebuild (capture partitioning/clustering/sort attributes, recreate atomically where the
+  warehouse allows -- e.g. Databricks `CREATE OR REPLACE TABLE` -- and degrade with a warning
+  when capture fails). The platform's `--reset-target` runtime flag overrides the effective
+  handling to `OVERWRITE`+`DROP` and BYPASSES capability validation, so declaring only
+  FAIL/MERGE does not protect a connector from receiving DROP. Capability lists gate what
+  users may CONFIGURE (the first-run collision policy); the runtime can send more.
+- A JSONL-only destination that supports only STRICT error handling MUST declare the
+  `errorHandling` FieldCapability as STRICT-only with a STRICT default. The stage-format
+  planner requires rejected-row validation for JSONL routing unless the pipeline is
+  explicitly STRICT, and the platform-wide config default is MODERATE -- an undeclared
+  STRICT-only destination makes every default pipeline fail routing with
+  NO_COMMON_STAGE_FORMAT.
+- Verify the warehouse's FILE-LOAD schema resolution semantics against the live service
+  before trusting implicit coercion. Databricks `COPY INTO ... FILEFORMAT = JSON` resolves
+  the inferred source schema by Delta schema MERGE, not store-assignment casts: an explicit
+  per-column CAST projection is REQUIRED or `prefersDecimal`-inferred DECIMAL values fail
+  with DELTA_FAILED_TO_MERGE_FIELDS against DOUBLE/STRING stage columns.
+- Field-level discovery must EXCLUDE objects whose columns the connecting principal cannot
+  see (log the count and the grant remedy). Catalog permission models can grant list-level
+  visibility without column visibility (Unity Catalog BROWSE vs SELECT; the shared `samples`
+  catalog does this); emitting field-less objects fails metadata compliance because no
+  cursor/identity strategy is derivable, and BOTH bulk and per-table metadata paths are
+  equally blind, so falling back does not help.
+- Validate connector-exposed driver property names against the PINNED driver's own parameter
+  registry (decompile/`javap` the parameter enum if needed). Property vocabularies change
+  across driver generations (Simba `ConnectTimeout`/`UseCloudFetch` do not exist in the
+  Databricks OSS driver; `EnableArrow` is a documented no-op there), and drivers ignore
+  unknown properties silently, so a stale allowlist ships dead knobs. Check retry/timeout
+  DEFAULTS the same way before copying another platform's tuning.
 - Treat destination identifiers as a two-stage contract: `NamespaceRules` decides whether a name
   is preserved or intentionally transformed, then the destination validates and quotes it. Under
   `MIRROR_SOURCE`, preserve every destination-legal source name exactly; quoting does not make an
