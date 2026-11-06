@@ -2,6 +2,8 @@
 
 Use this reference when a connector task includes customer-facing docs or marketing in `supaflow-www`.
 
+The writing rules, red flags, and copy-editing pass below also apply to any non-connector docs page (for example, ingestion or activation pipeline guides) that the same task edits.
+
 ## Goal
 
 Write and review connector docs as product documentation for users configuring a connector, not internal notes for engineers reading implementation details.
@@ -25,6 +27,16 @@ Good reference types:
 Do not template off `hubspot.mdx`, `salesforce/index.mdx`, `salesforce-marketing-cloud.mdx`, or `postgres.mdx` -- each carries known drift from the current rules (destination-in-prerequisites, cursor-field column, missing sections, family-outlier structure). An existing doc that conflicts with these rules is technical debt, not a template.
 
 Use connector code and tests only to validate claims after the pattern is established.
+
+## Updating Existing Pages
+
+Use this section when the task changes pages that already exist, for example syncing docs and marketing to recent platform, app, or CLI commits. Edits to existing copy fail differently from new pages: stale restatements survive, still-true requirements get dropped, and specific copy turns generic.
+
+1. **Claim ledger.** List every fact the change adds, alters, or removes. Cite the code line that proves each one: connector code for connector behavior, `supaflow-app` for UI labels and navigation, the CLI or MCP source for command behavior. Labels may be assembled at runtime (for example `Create {type} Pipeline`), so search for the fragments when the literal string is absent.
+2. **Consistency sweep.** For each changed fact, grep the docs page and the connector's `data/connectors/marketing/{slug}.ts` for every other place that restates it: field descriptions, `Default:` lines, admonitions, troubleshooting, FAQ answers, and setup steps. Every restatement must agree with the new fact.
+3. **Regression check.** Every requirement or specific detail removed from marketing copy must be proven obsolete in code or docs, not just shortened away. Compare `setupSteps` against the docs Prerequisites and permissions sections; a requirement the docs still list must not disappear from the setup steps.
+4. **Specificity check.** Replacing named roles, APIs, or settings with "the roles listed in the setup guide" or similar deferrals is a regression unless the detail no longer fits the field. A setup step must still name what the user does.
+5. **Copy-editing pass** on every changed paragraph (see Review Order).
 
 ## Docs Index Is Required
 
@@ -79,7 +91,11 @@ Connector marketing pages in `supaflow-www/data/connectors/marketing/*.ts` fill 
 - remember that `setupSteps.detail` and `faq.answer` are rendered as plain text surfaces;
   do not rely on markdown lists, headings, emphasis, or inline markdown links there
 - if a long vendor workflow needs explanation, keep the marketing page brief and put the
-  fuller operational guidance in the source doc instead
+  fuller operational guidance in the source doc instead; keep the named requirements
+  (roles, APIs, resources) in the step even when the walkthrough moves to the docs
+- write at buyer altitude: no CLI, MCP, or API command steps, and no "where supported" /
+  "if available" hedges in `faq` or `setupSteps`; link the docs for operator detail
+- a yes/no FAQ answer whose answer may surprise the reader must say why in one clause
 
 ## Writing Rules
 
@@ -101,6 +117,17 @@ Connector marketing pages in `supaflow-www/data/connectors/marketing/*.ts` fill 
   - use the red asterisk from `FieldLabel ... required` for required fields
   - use `Options:` for enumerated values
   - group advanced settings only when it improves scanning
+- Describe roles and modes the way users see them ("when you add BigQuery as a source"), not as internal enum values.
+- Document current `main` behavior of the CLI and MCP tools. Do not add compatibility branches for older tool versions. Keep CLI or MCP creation guidance to one short subsection, or link the CLI docs.
+
+## Voice Checks
+
+Apply to every paragraph written or changed:
+
+- **Substitution test.** If the sentence could land verbatim on another connector's page, rewrite it with connector-specific detail or cut it.
+- **Mechanism, not adjective.** Name what the connector does at user altitude. The banned-adjective list lives in `supaflow-www/scripts/lint-seo/checks.mjs`.
+- **Quantify or cut.** Prefer user-visible numbers, defaults, and ranges over vague qualifiers.
+- **Active voice and plain verbs.** "Fix and re-test the connection" beats "the connection must be repaired".
 
 ## Review Order
 
@@ -118,6 +145,15 @@ Connector marketing pages in `supaflow-www/data/connectors/marketing/*.ts` fill 
    - Does the copy fit the actual `ConnectorMarketing` template shape?
    - Does `setupSteps` and `faq` copy still work as plain text?
    - Did we avoid stuffing long vendor workflows into marketing fields?
+5. Consistency and regression pass (required when editing existing pages):
+   - Does every restatement of a changed fact on the docs page and marketing file agree?
+   - Was every removed requirement or specific detail proven obsolete?
+6. Copy-editing pass:
+   - Load the `copy-editing` marketing skill when it is available; otherwise apply these sweeps directly.
+   - Clarity: no undefined jargon, unclear references, or sentences doing too much.
+   - So what: each claim tells the reader why it matters; surprising yes/no answers explain why.
+   - Specificity: concrete names, numbers, and actions replace vague or deferring wording.
+   - Proofread: grammar, missing articles before field labels, and duplicated text across pages.
 
 ## Red Flags
 
@@ -134,6 +170,12 @@ These should usually be findings in review:
 - typed-error or retry-layer implementation details
 - copied vendor approval workflows for protected scopes or permissions-required access
 - markdown or formatting assumptions in plain-text marketing surfaces
+- tool-version hedges such as "if your installed CLI does not recognize..." or "older MCP tools"
+- CLI or MCP command walkthroughs longer than one short subsection on a connector page
+- ALL_CAPS enum values or internal role names in prose ("the SOURCE role") and internal jargon such as "unscoped"
+- "where supported" or "if available" hedges in buyer-facing marketing copy
+- a setup step or FAQ answer whose only content is "see the setup guide"
+- a changed fact that another sentence on the page or marketing file still contradicts
 
 Exception: exact error strings the user will actually see -- whether emitted by the vendor or by Supaflow (Job Details / sync error messages) -- are fine and encouraged in Troubleshooting, even when they contain internal-sounding identifiers (e.g., "CT incremental read requires custom_state"). Quoted searchable error text is not a red flag; the same identifier in narrative prose is.
 
