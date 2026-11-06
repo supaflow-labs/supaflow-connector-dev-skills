@@ -18,7 +18,7 @@ Build connectors phase-by-phase, enforce verification gates before moving forwar
 - `api_surface`: object endpoints, pagination model, rate limits, and date/cursor fields
 - `test_credentials`: required env vars and sandbox/test account scope
 
-If the task also includes customer-facing connector docs or marketing pages in `supaflow-www`, you must also load `references/CONNECTOR_DOCS_MARKETING.md` before drafting or reviewing them.
+If the task also includes customer-facing connector docs or marketing pages in `supaflow-www`, you must also load `references/CONNECTOR_DOCS_MARKETING.md` before drafting, reviewing, or updating them. When updating existing pages, follow its "Updating Existing Pages" section.
 
 ## Phase 0: Mandatory Reading (Do This First, No Exceptions)
 
@@ -283,6 +283,6 @@ mvn clean install
 - External-stage IT proves normal and failure-path cleanup (or bounded retained diagnostics);
   cleanup code and lifecycle configuration without execution-path assertions are not evidence.
 - Anti-pattern checks reviewed before final handoff.
-- If the task includes connector docs or marketing, `references/CONNECTOR_DOCS_MARKETING.md` was followed and a red-flag sweep was completed before final handoff.
+- If the task includes connector docs or marketing, `references/CONNECTOR_DOCS_MARKETING.md` was followed and the red-flag sweep and copy-editing pass were completed before final handoff; for edits to existing pages, the consistency and regression passes were also completed.
 - If the task includes connector marketing pages, a template-surface pass was completed to confirm the copy fits the actual renderer and data shape.
 - Final handoff includes what was implemented, gate outputs, and any remaining risks/assumptions.
