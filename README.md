@@ -15,14 +15,15 @@
 # Supaflow Connector Skills
 
 AI-agent skills for building [Supaflow](https://www.supa-flow.io) data connectors. Guides an agent through
-an 8-phase workflow with gate checks, anti-pattern enforcement, and a verification script that validates
-the result.
+a standalone Python source workflow through the Supaflow CLI, or the existing platform
+workflow with phased gates and anti-pattern verification.
 
 Works with **Claude Code**, **OpenAI Codex**, and any agent that supports skill/prompt files.
 
 ## What this does
 
 **Does**
+- Build and test a standalone Python source with `supaflow connectors`, then register and deploy it to a private Docker agent when requested
 - Walk an AI coding agent through building Java or Python/dlt Supaflow connectors (source, direct database destination, warehouse/file destination, or activation target)
 - Enforce phased gates -- the agent cannot skip ahead until the current phase passes verification
 - Catch 20+ known anti-patterns before they reach production (e.g., calling `processor.close()`, missing `originalDataType`, using raw `maxCursorSeen` without a compatible boundary strategy)
@@ -47,7 +48,37 @@ ln -s "$(pwd)/supaflow-connector-dev-skills/skills/build-supaflow-connector" \
 
 Start a new Claude Code session. The skill is now available as `/build-supaflow-connector`.
 
-The skill will ask you to provide the following inputs. Here's how to fill them in:
+### Standalone CLI workflow
+
+For a customer Python source in its own project, invoke the skill with:
+
+```text
+/build-supaflow-connector
+
+workflow: standalone-cli
+project_root: /absolute/path/to/my-source
+connector_name: MY_SOURCE
+group_id: com.acme
+template: custom-source
+version: 0.1.0.dev1
+Start with the MVP and run its generated tests. Do not register or deploy yet.
+```
+
+In Codex invoke `$build-supaflow-connector` with the same inputs. See the
+[standalone CLI guide](skills/build-supaflow-connector/references/STANDALONE_CLI_GUIDE.md)
+for prerequisites, source templates, lifecycle tests, tenant registration and
+local private-agent deployment. It uses no platform clone or Maven verifier.
+
+Standalone authoring requires an authoring-enabled CLI bundle and a compatible
+agent image; these instructions do not enable commands missing from a public
+CLI release. Use the existing [CLI setup](https://www.supa-flow.io/docs/cli) and
+[Docker agent deployment guide](https://www.supa-flow.io/docs/settings/agents#deploying-a-self-hosted-docker-agent)
+rather than creating new enrollment steps. Installing the skill does not publish
+packages, enroll an agent, or register/deploy a connector.
+
+### Platform repository workflow
+
+For an existing connector in a platform checkout, the skill uses the following inputs:
 
 | Input | What to provide | Examples |
 |-------|----------------|----------|
@@ -101,7 +132,11 @@ If an agent platform cannot invoke the skill through its skill tool, fall back t
 
 ## How it works
 
-The skill guides an agent through a phased build process. Each phase has a defined scope,
+Choose standalone CLI or platform development at the skill entry point. The
+phases and `verify_connector.sh` below apply only to platform development; the
+standalone workflow uses the CLI and its generated project tests.
+
+The platform workflow guides an agent through a phased build process. Each phase has a defined scope,
 prerequisite reading, and a gate check that must pass before proceeding.
 
 ### Phase Tracks
@@ -144,6 +179,8 @@ These rules are enforced at every phase:
 
 ## Usage
 
+For a standalone project, use the [CLI workflow](skills/build-supaflow-connector/references/STANDALONE_CLI_GUIDE.md). The inputs below apply only to platform connectors.
+
 ### Required Inputs
 
 | Input | Description | Example |
@@ -168,6 +205,9 @@ test_credentials: GOOGLE_APPLICATION_CREDENTIALS
 ```
 
 ## Verification Script
+
+This verifier is for platform connectors. Standalone projects use the CLI
+`check`, `test`, and `build` commands instead.
 
 The bundled verification script auto-detects Java and Python/dlt connectors.
 It runs Python/dlt structural and field-projection gates, including required
@@ -240,6 +280,7 @@ supaflow-connector-dev-skills/
 │       │   └── verify_python_dlt_connector.py # Python/dlt projection gate
 │       └── references/
 │           ├── README.md                     # Skill quick reference
+│           ├── STANDALONE_CLI_GUIDE.md        # Standalone source workflow
 │           ├── ANTI_PATTERNS.md              # 20+ anti-patterns with fixes
 │           ├── PORTABILITY.md                # Cross-environment usage
 │           ├── PHASE_1_PROJECT_SETUP.md      # Directory structure, pom.xml
@@ -258,7 +299,7 @@ supaflow-connector-dev-skills/
 
 ## Reference Connectors
 
-The skill references existing Supaflow connectors as implementation examples.
+The platform workflow references existing Supaflow connectors as implementation examples.
 These live in the `supaflow-platform` repo, not in this skill repo.
 
 | Connector | Pattern | Reference For |
@@ -294,9 +335,10 @@ before invoking the skill:
 ## FAQ
 
 **Do I need the full Supaflow platform to use this?**
-Yes. Java connectors compile against `supaflow-connector-sdk` and
-`supaflow-core`; Python/dlt connectors use the platform Python runtime and
-testkit. You need a working `supaflow-platform` clone for the selected track.
+No for the standalone CLI workflow: it uses a Python project and the selected
+SDK/toolchain packages. The platform workflow does require a working
+`supaflow-platform` clone: Java connectors compile against its SDK/core modules,
+and its Python/dlt connectors use the platform runtime and testkit.
 
 **Can I use this for non-Supaflow connectors?**
 The skill is specific to the Supaflow connector interface (`SupaflowConnector`). The anti-patterns
@@ -313,7 +355,8 @@ cd supaflow-connector-dev-skills
 git pull
 ```
 The symlink (Claude Code) points to the live repo, so updates are immediate.
-If you used `cp` (Codex), re-copy to pick up changes.
+For Codex, repeat the documented `rsync` installation and start a new session
+to load the updated copy.
 
 ## License
 

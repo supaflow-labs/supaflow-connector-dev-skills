@@ -1,6 +1,8 @@
 # Connector Development Skills
 
-This directory contains phased skill documents for building Supaflow connectors.
+This directory contains standalone CLI and platform-repository workflows for building Supaflow connectors.
+
+For a standalone Python source, start with [STANDALONE_CLI_GUIDE.md](STANDALONE_CLI_GUIDE.md). The platform phases, verifier commands, and platform-root requirements in this reference apply only to the platform workflow.
 
 ## Codex Quick Start (Codex-Specific)
 
@@ -35,7 +37,26 @@ Use either syntax:
 - `$build-supaflow-connector`
 - `Use the build-supaflow-connector skill`
 
-### 4) Real prompt example (copy/paste)
+### 4) Standalone CLI prompt (copy/paste)
+
+```text
+Use $build-supaflow-connector.
+
+workflow: standalone-cli
+project_root: /absolute/path/to/my-source
+connector_name: MY_SOURCE
+group_id: com.acme
+template: custom-source
+version: 0.1.0.dev1
+Start with the generated MVP and run its lifecycle tests before extending it.
+Do not register or deploy until requested.
+```
+
+No platform clone is needed. For Claude Code use `/build-supaflow-connector`
+with the same inputs. For an existing platform connector, use the platform
+example below instead.
+
+### 5) Platform prompt example (copy/paste)
 
 ```text
 Use $build-supaflow-connector.
@@ -52,6 +73,7 @@ test_credentials: STRIPE_API_KEY
 
 | Phase | File | Purpose | Gate Checks |
 |-------|------|---------|-------------|
+| Standalone | `STANDALONE_CLI_GUIDE.md` | CLI source authoring, tests, registration, local deployment | CLI check/test/build; authorized E2E |
 | 1 | `PHASE_1_PROJECT_SETUP.md` | Project structure, pom.xml, shell class | 9, 14, 25 |
 | 2 | `PHASE_2_CONNECTOR_IDENTITY.md` | getType, getName, properties, capabilities | 4, 5, 6, 11, 26 |
 | 3 | `PHASE_3_CONNECTION_AUTH.md` | setRuntimeContext, init, OAuth | 7, 10 |
@@ -128,7 +150,7 @@ Show gate verification output before moving on.
 ## Verification Script
 
 ```bash
-# Run verification on a connector (standalone skill package)
+# Run platform-connector verification using the installed skill package
 bash ./scripts/verify_connector.sh {connector-name} {platform-root}
 
 # Optional: export once instead of passing root each time
