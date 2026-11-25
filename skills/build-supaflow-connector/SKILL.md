@@ -1,13 +1,42 @@
 ---
 name: build-supaflow-connector
-description: Build or review Java and Python/dlt Supaflow connectors using a phased workflow for source connectors, structured destinations, and activation targets. Use this skill when implementing a new connector, debugging connector reads or field selection, adding incremental sync, or validating connector quality in a Supaflow platform repository with executable gates and anti-pattern enforcement.
+description: Build, review, or debug standalone Python source connectors with the Supaflow CLI, or Java and Python/dlt sources, destinations, and activation connectors in a platform checkout. Use for schema, field selection, incremental sync, lifecycle tests, tenant registration, and local private Docker agent deployment.
 ---
 
 # Build Supaflow Connector
 
-Build connectors phase-by-phase, enforce verification gates before moving forward, and apply hard guardrails from anti-pattern documentation.
+Choose the workflow from the user's request and project before collecting inputs.
 
-## Collect Inputs First
+## Choose the Workflow First
+
+`workflow` is an optional input: `standalone-cli` or `platform-repository`.
+Use it when provided; otherwise infer the workflow from the request and project.
+
+- **Standalone CLI:** Use this for a customer connector in its own Python project,
+  an explicit `supaflow connectors` workflow, or a request to scaffold a new
+  customer source without a platform checkout. Read
+  [STANDALONE_CLI_GUIDE.md](references/STANDALONE_CLI_GUIDE.md) and follow its
+  checks and completion criteria. No `platform_root`, Maven module, platform
+  clone, or `verify_connector.sh` is required. The platform phases, guardrails,
+  and completion criteria below do not apply to this workflow.
+- **Platform repository:** Use this for an existing connector under a Supaflow
+  platform checkout, or when the user explicitly requests platform development.
+  Follow the platform workflow below, including its existing Java/Python tracks.
+- If the request and project do not establish which workflow is wanted, ask
+  which one to use. Do not clone or modify a platform repository by default.
+
+The standalone CLI currently supplies **source** templates (`custom-source`,
+`api-source`, `sql-source`). Do not promise a standalone destination or activation
+starter; explain this limit if asked and use the platform workflow only if the
+user chooses it. Keep registration and agent deployment independent, and keep
+scheduling unchanged.
+
+## Platform Repository Workflow
+
+Everything below this heading is for the platform workflow only. Build connectors
+phase-by-phase using its existing verification gates and anti-pattern guidance.
+
+## Collect Platform Inputs First
 
 - `platform_root`: absolute path to a Supaflow platform repo clone containing `pom.xml` and `connectors/`
 - `connector_name`: directory/module suffix (for example, `airtable`)
